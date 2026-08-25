@@ -9,6 +9,7 @@
     fetch: true
     searchTimeoutMs: 60000
     fetchTimeoutMs: 60000
+  disabled: false
 
 - insert:
     - id: modellix

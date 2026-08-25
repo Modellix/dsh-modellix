@@ -83,6 +83,15 @@ abstract class ResourceController<T> {
       return true;
     } catch (error) {
       if (generation !== this.#generation) return false;
+      const errorCode = clientErrorCode(error);
+      if (errorCode === "cancelled") {
+        this.store.publish({
+          ...previous,
+          pending: null,
+          errorCode: null,
+        });
+        return false;
+      }
       const latest =
         error instanceof ModellixClientRpcError && error.state !== null
           ? (error.state as T)
@@ -91,7 +100,7 @@ abstract class ResourceController<T> {
         status: "error",
         data: latest,
         pending: null,
-        errorCode: clientErrorCode(error),
+        errorCode,
       });
       return false;
     }

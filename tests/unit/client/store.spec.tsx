@@ -221,6 +221,28 @@ describe("Modellix Client resource controllers", () => {
     });
   });
 
+  it("restores the prior resource state after lifecycle cancellation", async () => {
+    const rpc = rpcFrom(async (_channel, _endpoint, _payload, signal) =>
+      new Promise<RpcResult<unknown>>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      }));
+    const controller = new SettingsController(rpc);
+    const abort = new AbortController();
+    const loading = controller.load(abort.signal);
+
+    abort.abort();
+
+    await expect(loading).resolves.toBe(false);
+    expect(controller.store.getSnapshot()).toEqual({
+      status: "idle",
+      data: null,
+      pending: null,
+      errorCode: null,
+    });
+  });
+
   it("submits the current Design draft once with exact parameters", async () => {
     const payloads: unknown[] = [];
     const rpc = rpcFrom(async (_channel, endpoint, payload) => {
