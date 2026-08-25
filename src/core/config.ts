@@ -15,10 +15,15 @@ export interface DesignConfig {
   readonly enabled: boolean;
   readonly retentionPolicy: RetentionPolicy;
   readonly retentionPolicyRevision: number;
+  readonly lastModel: string | null;
+  readonly recentModels: readonly string[];
+  readonly favoriteModels: readonly string[];
 }
 
 export interface LlmConfig {
   readonly enabled: boolean;
+  readonly recentModels: readonly string[];
+  readonly favoriteModels: readonly string[];
 }
 
 export interface WebConfig {
@@ -58,6 +63,24 @@ export interface OnboardingConfig {
   readonly saveRecovery: OnboardingSaveRecovery | null;
 }
 
+export type PersistedLlmRouteOwnership = "none" | "created" | "adopted";
+
+export interface LlmRouteOwnershipEntry {
+  readonly kind: "field" | "model";
+  readonly key: string;
+  readonly appliedFingerprint: string;
+}
+
+export interface LlmRouteOwnershipConfig {
+  readonly ownership: PersistedLlmRouteOwnership;
+  readonly appliedRouteFingerprint: string | null;
+  readonly entries: readonly LlmRouteOwnershipEntry[];
+}
+
+export interface LlmOwnershipConfig {
+  readonly route: LlmRouteOwnershipConfig;
+}
+
 export interface PluginConfig {
   readonly schemaVersion: typeof CURRENT_CONFIG_SCHEMA_VERSION;
   readonly credentialRef: typeof MODELLIX_CREDENTIAL_REF;
@@ -65,6 +88,7 @@ export interface PluginConfig {
   readonly credentialEpoch: number;
   readonly services: ServicesConfig;
   readonly onboarding: OnboardingConfig;
+  readonly llmOwnership: LlmOwnershipConfig;
 }
 
 export interface BeginOnboardingSaveInput {
@@ -118,13 +142,27 @@ export function createDefaultConfig(): PluginConfig {
         enabled: DEFAULT_TOGGLES.design,
         retentionPolicy: "retain-input",
         retentionPolicyRevision: 1,
+        lastModel: null,
+        recentModels: [],
+        favoriteModels: [],
       },
-      llm: { enabled: DEFAULT_TOGGLES.llm },
+      llm: {
+        enabled: DEFAULT_TOGGLES.llm,
+        recentModels: [],
+        favoriteModels: [],
+      },
       web: { enabled: DEFAULT_TOGGLES.web },
     },
     onboarding: {
       status: "active",
       saveRecovery: null,
+    },
+    llmOwnership: {
+      route: {
+        ownership: "none",
+        appliedRouteFingerprint: null,
+        entries: [],
+      },
     },
   };
 }
@@ -151,6 +189,7 @@ export function migrateConfig(input: unknown): PluginConfig {
   const web = serviceRecord(services.web);
   const legacyWeb = serviceRecord(input.web);
   const onboarding = isRecord(input.onboarding) ? input.onboarding : {};
+  const llmOwnership = isRecord(input.llmOwnership) ? input.llmOwnership : {};
 
   const migrated: PluginConfig = {
     schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION,
@@ -170,9 +209,14 @@ export function migrateConfig(input: unknown): PluginConfig {
           design.retentionPolicyRevision,
           defaults.services.design.retentionPolicyRevision,
         ),
+        lastModel: optionalModelId(design.lastModel),
+        recentModels: modelIdList(design.recentModels),
+        favoriteModels: modelIdList(design.favoriteModels),
       },
       llm: {
         enabled: explicitBoolean(llm.enabled, defaults.services.llm.enabled),
+        recentModels: modelIdList(llm.recentModels),
+        favoriteModels: modelIdList(llm.favoriteModels),
       },
       web: {
         enabled: explicitBoolean(
@@ -187,6 +231,9 @@ export function migrateConfig(input: unknown): PluginConfig {
     onboarding: {
       status: onboardingStatus(onboarding.status, defaults.onboarding.status),
       saveRecovery: migrateSaveRecovery(onboarding.saveRecovery),
+    },
+    llmOwnership: {
+      route: migrateLlmRouteOwnership(llmOwnership.route),
     },
   };
 
@@ -494,6 +541,59 @@ function retentionPolicy(
   return value === "retain-input" || value === "metadata-only"
     ? value
     : fallback;
+}
+
+function migrateLlmRouteOwnership(input: unknown): LlmRouteOwnershipConfig {
+  const empty = createDefaultConfig().llmOwnership.route;
+  if (!isRecord(input)) return empty;
+  const ownership = input.ownership === "created" || input.ownership === "adopted"
+    ? input.ownership
+    : "none";
+  const appliedRouteFingerprint = safeFingerprint(input.appliedRouteFingerprint);
+  const entries = Array.isArray(input.entries)
+    ? input.entries.slice(0, 10_000).flatMap((value): LlmRouteOwnershipEntry[] => {
+        if (!isRecord(value)) return [];
+        const kind = value.kind === "field" || value.kind === "model" ? value.kind : null;
+        const key = typeof value.key === "string" && isSafeBoundedText(value.key, 256)
+          ? value.key
+          : null;
+        const appliedFingerprint = safeFingerprint(value.appliedFingerprint);
+        return kind === null || key === null || appliedFingerprint === null
+          ? []
+          : [{ kind, key, appliedFingerprint }];
+      })
+    : [];
+  return ownership === "none" || appliedRouteFingerprint === null
+    ? empty
+    : { ownership, appliedRouteFingerprint, entries };
+}
+
+function modelIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const candidate of value.slice(0, 100)) {
+    const id = optionalModelId(candidate);
+    if (id === null || seen.has(id)) continue;
+    seen.add(id);
+    output.push(id);
+  }
+  return output;
+}
+
+function optionalModelId(value: unknown): string | null {
+  return typeof value === "string" && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/.test(value)
+    ? value
+    : null;
+}
+
+function safeFingerprint(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+function isSafeBoundedText(value: string, maximum: number): boolean {
+  return value.length > 0 && value.length <= maximum && !hasControlCharacters(value);
 }
 
 function onboardingStatus(

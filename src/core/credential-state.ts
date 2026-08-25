@@ -70,12 +70,13 @@ export function createCredentialState(
 
 export function missingCredentialDescriptor(
   credentialEpoch: number,
+  writable = false,
 ): CredentialDescriptor {
   assertEpoch(credentialEpoch);
   return {
     configured: false,
     source: null,
-    writable: false,
+    writable,
     revision: null,
     credentialEpoch,
   };
@@ -86,7 +87,10 @@ export function normalizeCredentialDescriptor(
 ): CredentialDescriptor {
   assertEpoch(descriptor.credentialEpoch);
   if (!descriptor.configured) {
-    return missingCredentialDescriptor(descriptor.credentialEpoch);
+    if (descriptor.source !== null || descriptor.revision !== null) {
+      throw new TypeError("Missing Credential descriptors cannot expose source or revision");
+    }
+    return missingCredentialDescriptor(descriptor.credentialEpoch, descriptor.writable);
   }
   if (descriptor.source !== "local" && descriptor.source !== "env") {
     throw new TypeError("Configured Credential must have a local or env source");

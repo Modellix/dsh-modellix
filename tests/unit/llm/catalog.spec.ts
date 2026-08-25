@@ -17,7 +17,7 @@ function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
 
 describe("Modellix LLM catalog", () => {
   it("loads and validates full provider/name model IDs", async () => {
-    let request: { input: RequestInfo | URL; init?: RequestInit } | undefined;
+    let request: { input: string | URL | Request; init: RequestInit | undefined } | undefined;
     const client = new LlmCatalogClient({
       resolveCredential: async () => ({ value: "candidate-key", credentialEpoch: 4 }),
       now: () => 123,

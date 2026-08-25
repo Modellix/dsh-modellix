@@ -96,7 +96,7 @@ export class LlmCatalogClient {
           authorization: `Bearer ${credential.value}`,
         },
         redirect: "manual",
-        signal,
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
       const kind = signal?.aborted || isAbortError(error) ? "abort" : "network";

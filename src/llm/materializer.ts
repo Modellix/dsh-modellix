@@ -194,17 +194,22 @@ export function planLlmRouteRemoval(
 
 export interface SettingsNamespaceDescriptor {
   readonly revision: number;
+  readonly value: unknown;
+  readonly base?: unknown;
   readonly user?: unknown;
 }
 
 export interface LlmSettingsPort {
   describe(): Promise<SettingsNamespaceDescriptor | undefined>;
   mutate(
-    operations: readonly {
-      readonly op: "set" | "unset";
+    operations: readonly ({
+      readonly op: "set";
       readonly path: readonly string[];
-      readonly value?: unknown;
-    }[],
+      readonly value: unknown;
+    } | {
+      readonly op: "unset";
+      readonly path: readonly string[];
+    })[],
     expectedRevision: number,
   ): Promise<void>;
 }
@@ -221,23 +226,39 @@ export class LlmSettingsMaterializer {
     catalog: readonly ModellixLlmModel[],
     ledger: LlmRouteLedger,
   ): Promise<LlmRouteLedger> {
-    const descriptor = await this.#settings.describe();
+    const descriptor = await this.#describeReady();
     if (descriptor === undefined) throw new Error("llm-pi-ai settings namespace is unavailable");
+    const effective = requireRecord(descriptor.value, "settings effective section");
+    const effectiveProviders = effective.providers === undefined
+      ? {}
+      : requireRecord(effective.providers, "effective providers");
+    const base = descriptor.base === undefined ? {} : requireRecord(descriptor.base, "settings base section");
+    const baseProviders = base.providers === undefined ? {} : requireRecord(base.providers, "base providers");
     const user = descriptor.user === undefined ? {} : requireRecord(descriptor.user, "settings user section");
-    const providers = user.providers === undefined ? {} : requireRecord(user.providers, "providers");
-    const plan = planLlmRouteMaterialization(providers[MODELLIX_LLM_PROVIDER_ID], catalog, ledger);
-    if (plan.changed) {
+    const userProviders = user.providers === undefined ? {} : requireRecord(user.providers, "user providers");
+    if (
+      userProviders[MODELLIX_LLM_PROVIDER_ID] === undefined &&
+      baseProviders[MODELLIX_LLM_PROVIDER_ID] !== undefined
+    ) {
+      throw new LlmRouteConflictError("composition base ownership");
+    }
+    const current = effectiveProviders[MODELLIX_LLM_PROVIDER_ID];
+    const plan = planLlmRouteMaterialization(current, catalog, ledger);
+    const nextLedger = ledger.ownership === "created"
+      ? { ...plan.ledger, ownership: "created" as const }
+      : plan.ledger;
+    if (plan.changed || userProviders[MODELLIX_LLM_PROVIDER_ID] === undefined) {
       await this.#settings.mutate([{
         op: "set",
         path: ["providers", MODELLIX_LLM_PROVIDER_ID],
         value: plan.route,
       }], descriptor.revision);
     }
-    return plan.ledger;
+    return nextLedger;
   }
 
   async remove(ledger: LlmRouteLedger): Promise<LlmRouteLedger> {
-    const descriptor = await this.#settings.describe();
+    const descriptor = await this.#describeReady();
     if (descriptor === undefined) return ledger;
     const user = descriptor.user === undefined ? {} : requireRecord(descriptor.user, "settings user section");
     const providers = user.providers === undefined ? {} : requireRecord(user.providers, "providers");
@@ -256,6 +277,17 @@ export class LlmSettingsMaterializer {
       }], descriptor.revision);
     }
     return plan.ledger;
+  }
+
+  async #describeReady(): Promise<SettingsNamespaceDescriptor | undefined> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const descriptor = await this.#settings.describe();
+      if (descriptor !== undefined) return descriptor;
+      if (attempt < 4) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+    return undefined;
   }
 }
 

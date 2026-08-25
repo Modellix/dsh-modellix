@@ -174,4 +174,43 @@ describe("core config", () => {
       }),
     ).toThrow(OnboardingSaveConflictError);
   });
+
+  it("migrates bounded model preferences and the non-secret LLM ownership ledger", () => {
+    const hash = "a".repeat(64);
+    const migrated = migrateConfig({
+      services: {
+        design: {
+          lastModel: "openai/gpt-image-2",
+          recentModels: ["openai/gpt-image-2", "openai/gpt-image-2", "bad"],
+          favoriteModels: ["google/nano-banana-2"],
+        },
+        llm: {
+          recentModels: ["openai/gpt-5.6-sol"],
+          favoriteModels: ["anthropic/claude-sonnet-5"],
+        },
+      },
+      llmOwnership: {
+        route: {
+          ownership: "created",
+          appliedRouteFingerprint: hash,
+          entries: [{ kind: "model", key: "openai/gpt-5.6-sol", appliedFingerprint: hash }],
+        },
+      },
+    });
+
+    expect(migrated.services.design).toMatchObject({
+      lastModel: "openai/gpt-image-2",
+      recentModels: ["openai/gpt-image-2"],
+      favoriteModels: ["google/nano-banana-2"],
+    });
+    expect(migrated.services.llm).toMatchObject({
+      recentModels: ["openai/gpt-5.6-sol"],
+      favoriteModels: ["anthropic/claude-sonnet-5"],
+    });
+    expect(migrated.llmOwnership.route).toEqual({
+      ownership: "created",
+      appliedRouteFingerprint: hash,
+      entries: [{ kind: "model", key: "openai/gpt-5.6-sol", appliedFingerprint: hash }],
+    });
+  });
 });

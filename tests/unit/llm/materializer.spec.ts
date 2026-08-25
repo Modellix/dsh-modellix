@@ -86,7 +86,7 @@ describe("llm-pi-ai Modellix route materialization", () => {
   it("uses the Settings revision as a CAS guard", async () => {
     const mutate = vi.fn(async () => undefined);
     const materializer = new LlmSettingsMaterializer({
-      describe: async () => ({ revision: 17, user: { providers: {} } }),
+      describe: async () => ({ revision: 17, value: { providers: {} }, user: { providers: {} } }),
       mutate,
     });
     const ledger = await materializer.materialize(catalog, EMPTY_LLM_ROUTE_LEDGER);
@@ -95,5 +95,20 @@ describe("llm-pi-ai Modellix route materialization", () => {
       op: "set",
       path: ["providers", "modellix"],
     })], 17);
+  });
+
+  it("refuses to shadow a composition-owned Modellix route", async () => {
+    const route = planLlmRouteMaterialization(undefined, catalog).route;
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => ({
+        revision: 1,
+        value: { providers: { modellix: route } },
+        base: { providers: { modellix: route } },
+      }),
+      mutate: vi.fn(async () => undefined),
+    });
+
+    await expect(materializer.materialize(catalog, EMPTY_LLM_ROUTE_LEDGER))
+      .rejects.toThrow(/composition base ownership/);
   });
 });

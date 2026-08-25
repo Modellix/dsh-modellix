@@ -92,6 +92,19 @@ describe("Credential state", () => {
       }),
     ).toThrow("Environment Credential descriptors are read-only");
   });
+
+  it("preserves provider writability while a Credential is missing", () => {
+    const state = createCredentialState({
+      configured: false,
+      source: null,
+      writable: true,
+      revision: null,
+      credentialEpoch: 2,
+    });
+
+    expect(state.descriptor.writable).toBe(true);
+    expect(state.verification).toBe("unknown");
+  });
 });
 
 describe("CredentialMutationCoordinator", () => {
