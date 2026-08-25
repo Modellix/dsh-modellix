@@ -8,8 +8,10 @@ import type {
 } from "./ports.js";
 import { systemClock, systemSleep } from "./ports.js";
 import type { JsonValue } from "./schema-ir.js";
+import { readBoundedResponseJson } from "../core/http.js";
 
 const PREDICTION_ORIGIN = "https://api.modellix.ai";
+const MAX_PREDICTION_RESPONSE_BYTES = 2 * 1024 * 1024;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CORRELATION_ID = /^[A-Za-z0-9._:-]{1,256}$/;
 
@@ -52,12 +54,14 @@ export interface SubmitPredictionInput {
   readonly apiKey: string;
   readonly body: Readonly<Record<string, JsonValue>>;
   readonly requestId?: string;
+  readonly signal?: AbortSignal;
 }
 
 export interface ReadPredictionInput {
   readonly taskId: string;
   readonly apiKey: string;
   readonly maxAttempts?: number;
+  readonly signal?: AbortSignal;
 }
 
 export class PredictionClient {
@@ -75,6 +79,7 @@ export class PredictionClient {
 
   /** A paid POST is attempted exactly once and never follows redirects. */
   async submit(input: SubmitPredictionInput): Promise<PredictionTask> {
+    input.signal?.throwIfAborted();
     const endpoint = validateSubmitEndpoint(input.endpoint, input.modelSlug);
     const apiKey = validateApiKey(input.apiKey);
     const requestId = safeId(input.requestId);
@@ -99,6 +104,7 @@ export class PredictionClient {
         }),
         body: JSON.stringify(input.body),
         redirect: "error",
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch (cause) {
       this.#log({
@@ -136,7 +142,11 @@ export class PredictionClient {
 
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = await readBoundedResponseJson(
+        response,
+        MAX_PREDICTION_RESPONSE_BYTES,
+        input.signal,
+      );
     } catch (cause) {
       throw new DesignError(
         "SUBMIT_UNKNOWN",
@@ -172,6 +182,7 @@ export class PredictionClient {
     let lastFailure: unknown = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      input.signal?.throwIfAborted();
       try {
         const response = await this.#fetch(url, {
           method: "GET",
@@ -180,6 +191,7 @@ export class PredictionClient {
             authorization: `Bearer ${apiKey}`,
           }),
           redirect: "error",
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
         });
         if (!response.ok) {
           const failure = new TaskReadFailure(
@@ -194,12 +206,16 @@ export class PredictionClient {
             );
           }
           lastFailure = failure;
-          await this.#waitBeforeRetry(attempt, failure.retryAfterMs);
+          await this.#waitBeforeRetry(attempt, failure.retryAfterMs, input.signal);
           continue;
         }
         let payload: unknown;
         try {
-          payload = await response.json();
+          payload = await readBoundedResponseJson(
+            response,
+            MAX_PREDICTION_RESPONSE_BYTES,
+            input.signal,
+          );
         } catch (cause) {
           throw new DesignError(
             "UNEXPECTED_RESPONSE",
@@ -235,7 +251,7 @@ export class PredictionClient {
           );
         }
         lastFailure = caught;
-        await this.#waitBeforeRetry(attempt, null);
+        await this.#waitBeforeRetry(attempt, null, input.signal);
       }
     }
     throw new DesignError(
@@ -245,7 +261,11 @@ export class PredictionClient {
     );
   }
 
-  async #waitBeforeRetry(attempt: number, retryAfter: number | null): Promise<void> {
+  async #waitBeforeRetry(
+    attempt: number,
+    retryAfter: number | null,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const delay = Math.max(retryAfter ?? 0, Math.min(5_000, 250 * 2 ** (attempt - 1)));
     this.#log({
       level: "warn",
@@ -253,12 +273,26 @@ export class PredictionClient {
       operation: "read-task",
       attempt,
     });
-    await this.#sleep.sleep(delay);
+    await abortable(this.#sleep.sleep(delay), signal);
   }
 
   #log(event: DesignLogEvent): void {
     this.#logger?.write(event);
   }
+}
+
+async function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return operation;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
 }
 
 export function validateSubmitEndpoint(endpoint: string, modelSlug: string): URL {

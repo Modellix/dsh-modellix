@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   HttpPolicyError,
+  HttpResponseBoundaryError,
   approveHttpRequest,
   approveRedirect,
   computeRetryDelay,
   executeWithRetry,
   isRetryableReadFailure,
   parseRetryAfter,
+  readBoundedResponseJson,
   retryAfterFromFailure,
   type HttpRetryFailure,
 } from "../../../src/core/http.js";
@@ -59,6 +61,36 @@ describe("HTTP origin policy", () => {
         { method: "GET", hasAuthorization: true },
       ),
     ).toThrowError("Cross-origin redirects are not allowed");
+  });
+});
+
+describe("bounded response parsing", () => {
+  it("parses JSON without trusting an absent Content-Length", async () => {
+    await expect(readBoundedResponseJson(
+      new Response(JSON.stringify({ ok: true })),
+      1_024,
+    )).resolves.toEqual({ ok: true });
+  });
+
+  it("rejects declared and streamed bodies above the byte boundary", async () => {
+    await expect(readBoundedResponseJson(new Response("{}", {
+      headers: { "content-length": "2048" },
+    }), 1_024)).rejects.toMatchObject({ code: "BODY_TOO_LARGE" });
+
+    await expect(readBoundedResponseJson(
+      new Response(new TextEncoder().encode(`{"value":"${"x".repeat(1_024)}"}`)),
+      128,
+    )).rejects.toBeInstanceOf(HttpResponseBoundaryError);
+  });
+
+  it("honors cancellation while consuming the body", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(readBoundedResponseJson(
+      new Response("{}"),
+      1_024,
+      controller.signal,
+    )).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 

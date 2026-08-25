@@ -1,9 +1,11 @@
 import { DesignError } from "./errors.js";
 import type { FetchPort } from "./ports.js";
+import { readBoundedResponseJson } from "../core/http.js";
 
 const PUBLIC_ORIGIN = "https://www.modellix.ai";
 const PREDICTION_ORIGIN = "https://api.modellix.ai";
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const MAX_SCHEMA_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface ModelSchemaDocument {
   readonly provider: string;
@@ -29,17 +31,21 @@ export class ModelSchemaClient {
       options.allowPortalDetailFallback === true;
   }
 
-  async load(provider: string, modelId: string): Promise<ModelSchemaDocument> {
+  async load(
+    provider: string,
+    modelId: string,
+    signal?: AbortSignal,
+  ): Promise<ModelSchemaDocument> {
     assertIdentifier(provider, "provider");
     assertIdentifier(modelId, "modelId");
     let result: ModelSchemaDocument;
     try {
-      result = await this.#loadPublicSchema(provider, modelId);
+      result = await this.#loadPublicSchema(provider, modelId, signal);
     } catch (caught) {
       if (!this.#allowPortalDetailFallback) {
         throw caught;
       }
-      result = await this.#loadPortalDetail(provider, modelId);
+      result = await this.#loadPortalDetail(provider, modelId, signal);
     }
 
     return result;
@@ -48,12 +54,13 @@ export class ModelSchemaClient {
   async #loadPublicSchema(
     provider: string,
     modelId: string,
+    signal?: AbortSignal,
   ): Promise<ModelSchemaDocument> {
     const url = new URL(
       `/models/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}/api_schema`,
       PUBLIC_ORIGIN,
     );
-    const document = await requestNoAuthorization(this.#fetch, url);
+    const document = await requestNoAuthorization(this.#fetch, url, signal);
     const submitUrl = extractAllowedSubmitUrl(document, provider, modelId);
     return {
       provider,
@@ -67,13 +74,14 @@ export class ModelSchemaClient {
   async #loadPortalDetail(
     provider: string,
     modelId: string,
+    signal?: AbortSignal,
   ): Promise<ModelSchemaDocument> {
     const url = new URL(
       `/portal/v1/models/${encodeURIComponent(modelId)}`,
       PUBLIC_ORIGIN,
     );
     url.searchParams.set("provider", provider);
-    const payload = await requestNoAuthorization(this.#fetch, url);
+    const payload = await requestNoAuthorization(this.#fetch, url, signal);
     const data = asRecord(payload.data) ?? payload;
     const schemaData = parseSchemaData(data.schema_data ?? data.schemaData);
     return {
@@ -168,6 +176,7 @@ function parseSchemaData(value: unknown): Readonly<Record<string, unknown>> {
 async function requestNoAuthorization(
   fetchPort: FetchPort,
   url: URL,
+  signal?: AbortSignal,
 ): Promise<Readonly<Record<string, unknown>>> {
   let response: Response;
   try {
@@ -175,6 +184,7 @@ async function requestNoAuthorization(
       method: "GET",
       headers: new Headers({ accept: "application/json" }),
       redirect: "error",
+      ...(signal === undefined ? {} : { signal }),
     });
   } catch (cause) {
     throw new DesignError("SCHEMA_UNAVAILABLE", "The model schema request failed", {
@@ -190,7 +200,7 @@ async function requestNoAuthorization(
   }
   let parsed: unknown;
   try {
-    parsed = await response.json();
+    parsed = await readBoundedResponseJson(response, MAX_SCHEMA_RESPONSE_BYTES, signal);
   } catch (cause) {
     throw new DesignError("SCHEMA_INVALID", "The model schema is not valid JSON", {
       cause,

@@ -1,4 +1,5 @@
 import { DesignError } from "./errors.js";
+import { readBoundedResponseJson } from "../core/http.js";
 import type { CachePort, ClockPort, FetchPort } from "./ports.js";
 import { systemClock } from "./ports.js";
 
@@ -50,6 +51,7 @@ const DEFAULT_PAGE_SIZE = 24;
 const MAX_PAGE_SIZE = 100;
 const MAX_PAGE = 10_000;
 const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
+const MAX_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export class ModelCatalogClient {
   readonly #fetch: FetchPort;
@@ -73,7 +75,7 @@ export class ModelCatalogClient {
     this.#clock = options.clock ?? systemClock;
   }
 
-  async list(query: ModelCatalogQuery): Promise<ModelCatalogPage> {
+  async list(query: ModelCatalogQuery, signal?: AbortSignal): Promise<ModelCatalogPage> {
     const normalized = normalizeQuery(query);
     const cacheKey = `design:catalog:v1:${normalized.category}:${normalized.page}:${normalized.pageSize}`;
     const cached = await this.#cache?.read<ModelCatalogPage>(cacheKey);
@@ -90,6 +92,7 @@ export class ModelCatalogClient {
           normalized,
           apiKey,
           "authenticated-api",
+          signal,
         );
       } catch (caught) {
         if (!this.#allowPublicPortalFallback) {
@@ -100,6 +103,7 @@ export class ModelCatalogClient {
           normalized,
           null,
           "public-portal",
+          signal,
         );
       }
     } else if (this.#allowPublicPortalFallback) {
@@ -108,6 +112,7 @@ export class ModelCatalogClient {
         normalized,
         null,
         "public-portal",
+        signal,
       );
     } else {
       throw new DesignError(
@@ -128,6 +133,7 @@ export class ModelCatalogClient {
     query: Required<ModelCatalogQuery>,
     apiKey: string | null,
     source: ModelCatalogPage["source"],
+    signal?: AbortSignal,
   ): Promise<ModelCatalogPage> {
     const url = new URL(baseUrl);
     url.searchParams.set("category", query.category);
@@ -144,6 +150,7 @@ export class ModelCatalogClient {
         method: "GET",
         headers,
         redirect: "error",
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (cause) {
       throw new DesignError(
@@ -160,7 +167,16 @@ export class ModelCatalogClient {
       );
     }
 
-    const payload = await readJson(response, "model catalog");
+    let payload: unknown;
+    try {
+      payload = await readBoundedResponseJson(response, MAX_CATALOG_RESPONSE_BYTES, signal);
+    } catch (cause) {
+      throw new DesignError(
+        "UNEXPECTED_RESPONSE",
+        "The model catalog response is not bounded valid JSON",
+        { cause },
+      );
+    }
     return parseCatalogPage(payload, query, source);
   }
 }
@@ -350,16 +366,4 @@ function firstArray(...values: readonly unknown[]): readonly unknown[] | null {
     }
   }
   return null;
-}
-
-async function readJson(response: Response, label: string): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch (cause) {
-    throw new DesignError(
-      "UNEXPECTED_RESPONSE",
-      `The ${label} response is not valid JSON`,
-      { cause },
-    );
-  }
 }

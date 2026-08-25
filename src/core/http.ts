@@ -38,6 +38,82 @@ export class HttpPolicyError extends Error {
   }
 }
 
+export class HttpResponseBoundaryError extends Error {
+  readonly code: "BODY_MISSING" | "BODY_TOO_LARGE" | "INVALID_ENCODING" | "INVALID_JSON";
+
+  constructor(code: HttpResponseBoundaryError["code"], message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "HttpResponseBoundaryError";
+    this.code = code;
+  }
+}
+
+/** Reads a response incrementally so a hostile Content-Length cannot allocate an unbounded body. */
+export async function readBoundedResponseText(
+  response: Response,
+  maximumBytes: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 64 * 1024 * 1024) {
+    throw new TypeError("maximumBytes must be an integer from 1 through 67108864");
+  }
+  const declared = response.headers.get("content-length");
+  if (declared !== null && /^\d+$/u.test(declared)) {
+    const bytes = Number(declared);
+    if (!Number.isSafeInteger(bytes) || bytes > maximumBytes) {
+      throw new HttpResponseBoundaryError("BODY_TOO_LARGE", "Response exceeds the byte limit");
+    }
+  }
+  if (response.body === null) {
+    throw new HttpResponseBoundaryError("BODY_MISSING", "Response body is missing");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const chunks: string[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += chunk.value.byteLength;
+      if (received > maximumBytes) {
+        throw new HttpResponseBoundaryError("BODY_TOO_LARGE", "Response exceeds the byte limit");
+      }
+      try {
+        chunks.push(decoder.decode(chunk.value, { stream: true }));
+      } catch (cause) {
+        throw new HttpResponseBoundaryError("INVALID_ENCODING", "Response is not valid UTF-8", { cause });
+      }
+    }
+    try {
+      chunks.push(decoder.decode());
+    } catch (cause) {
+      throw new HttpResponseBoundaryError("INVALID_ENCODING", "Response is not valid UTF-8", { cause });
+    }
+    signal?.throwIfAborted();
+    return chunks.join("");
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function readBoundedResponseJson(
+  response: Response,
+  maximumBytes: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const text = await readBoundedResponseText(response, maximumBytes, signal);
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (cause) {
+    throw new HttpResponseBoundaryError("INVALID_JSON", "Response is not valid JSON", { cause });
+  }
+}
+
 /**
  * Applies the shared origin boundary. Model-specific endpoint/path validation is
  * intentionally an additional Design-layer policy and must run before submit.
