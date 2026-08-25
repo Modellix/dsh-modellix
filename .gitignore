@@ -1,0 +1,21 @@
+# Local agent instructions
+AGENTS.md
+
+# Dependencies and build output
+node_modules/
+lib/
+dist/
+coverage/
+.cache/
+*.tsbuildinfo
+*.tgz
+
+# Test and tool output
+test-results/
+playwright-report/
+*.log
+
+# Local environment files
+.env
+.env.*
+!.env.example

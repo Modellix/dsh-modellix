@@ -1,0 +1,6 @@
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false
+
+overrides:
+  react: 18.3.1

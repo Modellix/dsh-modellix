@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": [
+      "ES2024"
+    ],
+    "types": [
+      "node"
+    ],
+    "tsBuildInfoFile": "./.cache/tsbuild/host.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts",
+    "tests/unit/**/*.ts",
+    "tests/contract/**/*.ts",
+    "tests/integration/**/*.ts",
+    "tests/security/**/*.ts",
+    "scripts/**/*.mjs"
+  ],
+  "exclude": [
+    "src/client/**",
+    "tests/browser/**"
+  ]
+}
