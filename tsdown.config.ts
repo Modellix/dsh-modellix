@@ -6,6 +6,7 @@ const packageId = 'dsh-modellix'
 const productionPackages = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/dsh-anonymous-user-id',
   '@deepseek-ai/dsh-client-connection',
   '@deepseek-ai/dsh-client-locale',
   '@deepseek-ai/dsh-client-runtime',
@@ -14,14 +15,17 @@ const productionPackages = [
   '@deepseek-ai/dsh-client-ui-settings',
   '@deepseek-ai/dsh-client-ui-tool',
   '@deepseek-ai/dsh-credentials',
+  '@deepseek-ai/dsh-host-apiproxy',
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-llm-pi-ai',
   '@deepseek-ai/dsh-settings',
   '@deepseek-ai/dsh-storage',
+  '@deepseek-ai/dsh-storage-domain',
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-web',
   '@deepseek-ai/schemastery',
+  'zod',
 ] as const
 
 const clientExternals = new Set([
@@ -60,8 +64,9 @@ export default defineConfig(({ env }) => {
       format: 'esm',
       platform: 'node',
       target: 'es2024',
+      tsconfig: 'tsconfig.host.json',
       fixedExtension: false,
-      dts: true,
+      dts: { sourcemap: false },
       sourcemap: true,
       clean: true,
       deps: {
@@ -78,8 +83,9 @@ export default defineConfig(({ env }) => {
     format: 'cjs',
     platform: 'browser',
     target: 'es2024',
-    fixedExtension: false,
-    dts: true,
+    tsconfig: 'tsconfig.client.json',
+    outExtensions: () => ({ js: '.js', dts: '.d.ts' }),
+    dts: { sourcemap: false },
     sourcemap: true,
     clean: false,
     deps: {
@@ -91,14 +97,13 @@ export default defineConfig(({ env }) => {
       'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
       'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
     },
-    outputOptions: {
-      entryFileNames: 'client.js',
-      banner: `window.__ModuleLoader__.load({
+    banner: {
+      js: `window.__ModuleLoader__.load({
   id: ${JSON.stringify(packageId)},
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;`,
-      footer: 'return module.exports; } });',
     },
+    footer: { js: 'return module.exports; } });' },
   }
 })
