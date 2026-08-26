@@ -29,6 +29,8 @@ The first-run dialog contains an API Key field and Design, LLM, and Web switches
 
 ## Installation
 
+For a Windows-first walkthrough from this source checkout, see [Using dsh-modellix locally](docs/en-US/LOCAL_USAGE.md) or its [Chinese edition](docs/zh-CN/LOCAL_USAGE.md).
+
 Install the published package into the target Web profile, inspect the merged configuration, then start or restart that profile:
 
 ```sh

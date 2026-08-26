@@ -4,7 +4,9 @@ import { posix } from 'node:path'
 export const DOCUMENTATION_FILES = Object.freeze([
   'README.md',
   'README.zh-CN.md',
+  'docs/en-US/LOCAL_USAGE.md',
   'docs/en-US/USER_GUIDE.md',
+  'docs/zh-CN/LOCAL_USAGE.md',
   'docs/zh-CN/USER_GUIDE.md',
 ])
 

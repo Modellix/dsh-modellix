@@ -29,6 +29,8 @@
 
 ## 安装
 
+需要从当前源码在 Windows 本机完整安装和启动时，请直接阅读 [dsh-modellix 本地使用指南](docs/zh-CN/LOCAL_USAGE.md)；同时提供[英文版本](docs/en-US/LOCAL_USAGE.md)。
+
 将已发布包安装到目标 Web profile，检查合并后的配置，然后启动或重启该 profile：
 
 ```sh
