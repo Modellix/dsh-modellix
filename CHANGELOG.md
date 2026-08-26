@@ -6,6 +6,19 @@ The format follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-26
+
+### Fixed
+
+- Allowed the Modellix credential and removal dialogs to open from inside the Harness Settings modal while retaining external-dialog arbitration and correct focus restoration.
+- Cleared transient live-region copy when the Harness locale changes so an English or Chinese view cannot retain a stale message from the previous locale.
+
+### Changed
+
+- Replaced the shared mixed-language screenshot set with twelve separate English and Chinese full-screen captures from a real configured Harness session, including live Design, LLM, image generation, Search, and Fetch results.
+
+## [0.1.0] - 2026-08-26
+
 ### Added
 
 - DeepSeek Harness Profile Bundle registration with Host and Web Client entry points.

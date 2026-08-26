@@ -51,7 +51,7 @@ dsh --profile web
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.1.1.tgz
 ```
 
 `pnpm run check` 包含环境检查、类型检查、lint、完整单元/契约测试、全局覆盖率硬门槛以及 Host runtime 和 Design 参数规划器的文件级回归下限；`verify:release:static` 还执行生产依赖审计、构建、精确制品校验、Node 24 tarball 隔离安装和必须存在的 Node.js `^22.19.0` tarball runtime smoke。它不代替真实浏览器与真实 API/Agent 验收。直接从 Git 安装 TypeScript 源码要求安装阶段能够生成 `lib/`；没有经过验证的 `prepare` 流程时，请使用已发布包或预构建 tarball。
@@ -67,7 +67,7 @@ dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
   "version": 1,
   "kind": "browser",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {
@@ -91,7 +91,7 @@ dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
   "version": 1,
   "kind": "api-agent",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {
@@ -123,7 +123,6 @@ pnpm run verify:release
 
 当插件尚无可用 Credential 且没有被延后配置时，Harness Web UI 会显示“连接 Modellix”弹窗。
 
-![Modellix 首次配置弹窗，API Key 输入框为空，Design、LLM 和 Web 开关均开启](../assets/onboarding-defaults.webp)
 
 ### 标准流程
 
@@ -170,7 +169,7 @@ pnpm run verify:release
 
 ## Modellix 设置页
 
-![Modellix 设置页显示已验证 Credential、三个功能开关和 LLM 目录状态](../assets/settings-ready.webp)
+![真实 Harness 会话中的中文 Modellix 设置页，显示已验证本机 Credential、三个功能开关和实时 LLM 目录](../assets/settings-ready-zh.webp)
 
 设置页包含三张主要卡片。
 
@@ -207,7 +206,7 @@ Design、LLM、Web 可以独立开关。修改后必须选择“保存更改”�
 
 ### 左右布局
 
-![Modellix Design 桌面布局，左侧为模型、提示词和参数，右侧为生成结果列表](../assets/design-desktop.webp)
+![真实 Harness 会话中的中文 Modellix Design 双栏桌面布局，左侧为实时模型参数，右侧为结果](../assets/design-desktop-zh.webp)
 
 桌面端 Design 采用“左侧对话与参数、右侧结果”的两栏布局：
 
@@ -276,7 +275,7 @@ Design 使用当前 Modellix 模型目录，不内置一份假定永远有效的
 - 返回摘要、字段前后差异和可能的冲突；
 - 不会自动应用改动，也不会自动生成媒体。
 
-![Design 参数提议卡显示待确认的前后差异和应用、拒绝操作](../assets/design-proposal.webp)
+![中文真实 Design 参数提议，显示 Schema 合法的前后值与应用、拒绝操作](../assets/design-proposal-zh.webp)
 
 检查差异后选择“应用变更”或“拒绝”。有冲突时必须先解决；提议生成后若当前参数或 Schema 已改变，过期提议会被拒绝，请重新生成提议。
 
@@ -316,7 +315,7 @@ Design 使用当前 Modellix 模型目录，不内置一份假定永远有效的
 
 ### 结果列表、预览与过期
 
-![Design 结果区显示真实验收生成的图片结果、有效期和下载入口](../assets/design-results-media.webp)
+![中文 Design 结果区显示真实 1536×1024 图片、有效期、原图和下载操作](../assets/design-results-media-zh.webp)
 
 重新打开 Design 或进入新的 Harness 会话时，结果区会从 Host 持久记录重新加载；尚未过期的资源仍可查看。结果按最近更新时间排序，最多显示当前持久化记录中的最近 1,000 项，并分为：
 
@@ -347,7 +346,7 @@ LLM 功能复用同一个 Key，不要求为每个模型分别配置凭据。
 
 切换模型不会重放之前的调用；之后每次 Harness 模型调用都可能产生 Modellix 用量，Provider 重试上限始终为 `0`。若目标模型没有出现，应在设置页刷新目录，不要手动填写未经目录验证的模型 id。
 
-![Harness 模型选择器展开 Modellix Provider，并列出从实时目录同步的多个 LLM 模型](../assets/llm-model-selector.webp)
+![中文 Harness 模型选择器展开 Modellix Provider，并列出实时目录同步的 LLM 模型](../assets/llm-model-selector-zh.webp)
 
 插件把实时目录安全合并到 Harness `llm-pi-ai` 路由，并保留不属于插件的未知字段和用户模型元数据。协议配置为：
 
@@ -368,7 +367,7 @@ Web 开关开启且 Credential 可用时，插件为 Harness 注册：
 
 插件不会创建同名自定义 Tool。Harness 仍拥有 Tool 的参数、展示和生命周期，Bundle 只把 Provider 选择为 `modellix`。
 
-![Harness 对话中由 Modellix Provider 完成的原生 web_search 与 web_fetch 工具结果](../assets/web-tools.webp)
+![中文 Harness 中真实完成的 Modellix Search 与 Fetch 公开文档结果](../assets/web-tools-zh.webp)
 
 典型流程是先让 Harness 搜索一个公开主题，检查原生 `web_search` 返回的来源，再只对需要的结果调用 `web_fetch`。关闭 Web、移除 Key 或 Key 明确失效时，Provider 不可用。Web 请求可能产生 Modellix 用量，Provider 不会自动重试；若一次可能计费的 Fetch 结果未知，应先检查 Harness 对话记录或 Modellix 侧记录，再决定是否手动重复。提交前避免把 Secret、私人数据或不应发送给第三方的内容放入查询或目标页面。
 
@@ -401,7 +400,6 @@ Web 开关开启且 Credential 可用时，插件为 Harness 注册：
 
 402、429、离线、超时和 5xx 保持独立状态，不会打开 Key 无效恢复弹窗。
 
-![API Key 无效后的 Modellix 恢复弹窗，输入框为空并提供稍后处理](../assets/credential-recovery.webp)
 
 ## 可访问性、键盘与响应式
 
@@ -425,7 +423,6 @@ Web 开关开启且 Credential 可用时，插件为 Harness 注册：
 - 使用 Harness 语义 Token 适配浅色、深色和 Windows forced-colors。
 - `prefers-reduced-motion: reduce` 时关闭非必要动画和过渡。
 
-![英文 Modellix Design 在 320 像素宽度下使用单列布局，操作区位于结果区上方](../assets/design-mobile-en.webp)
 
 ## 成本与安全清单
 
@@ -520,21 +517,18 @@ dsh --profile web
 
 ## 已收录截图与安全拍摄清单
 
-以下图片已在独立验收 profile 中拍摄并经过 Secret 检查。多数插件文案使用中文；`design-mobile-en.webp` 和 `llm-model-selector.webp` 使用英文 Harness 界面，`web-tools.webp` 在英文 Harness 界面中展示中文公开文档请求与回答。中英文文档复用同一组安全截图并分别提供 Alt 文本：
+以下 6 张中文图片均从真实已配置 Harness Profile 以 1920×889 全屏拍摄并经过 Secret 检查；英文指南使用同流程的另一组 6 张英文图。真实会话完整使用了 Modellix 实时目录、参数助手、`gpt-image-2`、LLM、Search 和 Fetch：
 
 | 建议文件 | Alt 文本 | 拍摄重点 |
 | --- | --- | --- |
-| `docs/assets/onboarding-defaults.webp` | Modellix 首次配置弹窗，API Key 输入框为空，Design、LLM 和 Web 开关均开启 | 空 password 输入框、三个默认开关、稍后处理和保存按钮 |
-| `docs/assets/settings-ready.webp` | Modellix 设置页显示已验证 Credential、三个功能开关和 LLM 目录状态 | 只显示配置状态，不显示 Key |
-| `docs/assets/design-desktop.webp` | Modellix Design 桌面布局，左侧为模型、提示词和参数，右侧为生成结果列表 | 1440px、通用提示词、非敏感结果 |
-| `docs/assets/design-proposal.webp` | Design 参数提议卡显示待确认的前后差异和应用、拒绝操作 | 不包含个人数据，清楚显示提议不会自动生成 |
-| `docs/assets/design-results-media.webp` | Design 结果区显示真实验收生成的图片结果、有效期和下载入口 | 使用公开测试提示词生成的图片；视频和音频另经真实 API 验收，不在此图中混合展示 |
-| `docs/assets/design-mobile-en.webp` | 英文 Modellix Design 在 320 像素宽度下使用单列布局，操作区位于结果区上方 | 320px、最长英文文案、关键操作不裁切，并证明英文 UI 本地化 |
-| `docs/assets/credential-recovery.webp` | API Key 无效后的 Modellix 恢复弹窗，输入框为空并提供稍后处理 | 只使用模拟 401，绝不显示真实 Key |
-| `docs/assets/llm-model-selector.webp` | Harness 模型选择器展开 Modellix Provider，并列出从实时目录同步的多个 LLM 模型 | 只显示公开模型名，不显示账户或调用内容 |
-| `docs/assets/web-tools.webp` | Harness 对话中由 Modellix Provider 完成的原生 web_search 与 web_fetch 工具结果 | 使用公开测试网页，不显示私人 URL、Cookie 或请求详情 |
+| `docs/assets/settings-ready-zh.webp` | 中文 Modellix 设置页显示已验证 Credential 与实时 LLM 目录 | 只显示状态和来源，不显示已保存 Key |
+| `docs/assets/design-desktop-zh.webp` | 中文 Modellix Design 双栏工作区使用实时 `gpt-image-2` Schema | 全屏桌面布局与公开模型名 |
+| `docs/assets/design-proposal-zh.webp` | 中文真实参数提议，包含拒绝和应用操作 | 真实 LLM 参数提议，不会提交媒体生成 |
+| `docs/assets/design-results-media-zh.webp` | 中文结果区显示真实 1536×1024 验收图片 | 一次计费图片 POST，可见有效期、原图和下载操作 |
+| `docs/assets/llm-model-selector-zh.webp` | 中文 Harness 模型选择器显示实时 Modellix 目录 | 只显示公开模型名 |
+| `docs/assets/web-tools-zh.webp` | 中文 Harness 中真实完成的 Modellix Search 与 Fetch | 只读取公开官方文档，不显示请求内部信息 |
 
-这些截图只显示空 Key、明确的假 Key、公开模型名、公开网址和通用测试提示词；真实 Key 由验收进程直接读取，未进入浏览器、截图、Network/HAR、Console、Credential 文件或持久化录像。后续更新截图时必须继续遵守同一规则。
+Credential 已以 write-only 方式保存在本机 Harness 服务中；截图进程没有读取它，也没有打开请求检查器。截图不包含 Key、Network/HAR、Console、Credential 文件、Cookie、私人 URL 或持久化录像。后续更新截图时必须继续遵守同一规则。
 
 ## 参考资料
 

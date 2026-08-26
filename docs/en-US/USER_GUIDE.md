@@ -51,7 +51,7 @@ Build only from trusted source:
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.1.1.tgz
 ```
 
 `pnpm run check` includes environment verification, type checking, lint, the complete unit/contract suite, global hard coverage thresholds, and file-specific regression floors for the Host runtime and Design parameter planner. `verify:release:static` also performs the production dependency audit, build, exact artifact verification, an isolated Node 24 tarball installation, and a mandatory Node.js `^22.19.0` tarball runtime smoke. It does not replace real-browser and real API/Agent acceptance. Installing TypeScript source directly from Git requires the install phase to create `lib/`. Without a verified `prepare` flow, use the published package or a prebuilt tarball.
@@ -67,7 +67,7 @@ Browser evidence must attest onboarding, settings, Design, LLM, Web, 401 Credent
   "version": 1,
   "kind": "browser",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {
@@ -91,7 +91,7 @@ Real API/Agent evidence must cover catalogs, parameter planning, image, video, a
   "version": 1,
   "kind": "api-agent",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {
@@ -123,7 +123,6 @@ The gate does not execute or retry billed calls. It fails for a missing, failed,
 
 When the plugin has no usable Credential and setup has not been deferred, the Harness Web UI displays the “Connect Modellix” dialog.
 
-![Chinese-language Modellix first-time setup dialog with an empty API Key field and Design, LLM, and Web switches enabled](../assets/onboarding-defaults.webp)
 
 ### Standard flow
 
@@ -170,7 +169,7 @@ Screenshots and issue reports must never contain a real Key, Network request det
 
 ## Modellix settings
 
-![Chinese-language Modellix settings showing a verified Credential, three feature switches, and LLM catalog status](../assets/settings-ready.webp)
+![English Modellix settings in a real Harness session showing a verified local Credential, three feature switches, and the live LLM catalog](../assets/settings-ready-en.webp)
 
 The settings page has three primary cards.
 
@@ -207,7 +206,7 @@ A catalog refresh failure does not create a static replacement list or misreport
 
 ### Left/right layout
 
-![Chinese-language Modellix Design desktop layout with model, prompt, and parameters on the left and generation results on the right](../assets/design-desktop.webp)
+![English Modellix Design desktop layout in a real Harness session, with live model parameters on the left and results on the right](../assets/design-desktop-en.webp)
 
 Design uses a “conversation and parameters on the left, results on the right” two-column layout on desktop:
 
@@ -276,7 +275,7 @@ This action:
 - returns a summary, before-and-after field changes, and any conflicts;
 - neither applies changes nor starts media generation automatically.
 
-![Chinese-language Design parameter proposal showing before-and-after changes with Apply and Reject actions](../assets/design-proposal.webp)
+![English real Design parameter proposal showing Schema-valid before-and-after values with Apply and Reject actions](../assets/design-proposal-en.webp)
 
 After review, select “Apply changes” or “Reject.” Resolve conflicts first. If parameters or the Schema changed after proposal creation, the stale proposal is rejected; create another proposal.
 
@@ -316,7 +315,7 @@ If the connection ends during submission and the plugin cannot know whether upst
 
 ### Results, previews, and expiry
 
-![Chinese-language Design results pane showing the image created during real acceptance, its expiry, and download action](../assets/design-results-media.webp)
+![English Design results pane showing the real 1536 by 1024 image, its expiry, enlargement, and download actions](../assets/design-results-media-en.webp)
 
 When you reopen Design or enter a new Harness session, the results pane reloads Host-persisted records, so unexpired resources remain available. Results are sorted by most recent update. The UI shows at most the latest 1,000 current persisted records, grouped as:
 
@@ -347,7 +346,7 @@ LLM reuses the same Key and does not require a separate Credential per model.
 
 Switching models does not replay an earlier call. Each new Harness model call may incur Modellix usage, and the provider retry limit remains `0`. If the desired model is missing, refresh the catalog in settings instead of typing an unverified model id.
 
-![English-language Harness model selector expanded to the Modellix provider with multiple LLM models synchronized from the live catalog](../assets/llm-model-selector.webp)
+![English Harness model selector expanded to the Modellix provider with models synchronized from the live catalog](../assets/llm-model-selector-en.webp)
 
 The plugin safely merges the live catalog into the Harness `llm-pi-ai` route while preserving unknown fields and user model metadata it does not own. The protocol configuration is:
 
@@ -368,7 +367,7 @@ When Web is enabled and a Credential is usable, the plugin registers:
 
 It does not create duplicate custom tools. Harness continues to own tool arguments, presentation, and lifecycle; the Bundle only selects the `modellix` provider.
 
-![English-language Harness conversation showing native web_search and web_fetch completed by the Modellix provider for a Chinese public-documentation request](../assets/web-tools.webp)
+![English Harness chrome showing real Modellix Search and Fetch results for public official documentation](../assets/web-tools-en.webp)
 
 For a typical flow, ask Harness to search a public topic, inspect the native `web_search` sources, and then fetch only the result you need with `web_fetch`. The provider is unavailable when Web is disabled, the Key is removed, or the Key is explicitly invalid. Web requests may incur Modellix usage. The provider does not automatically retry a request; when a potentially billed Fetch outcome is unknown, inspect the Harness transcript or Modellix-side record before manually repeating it. Do not put Secrets, private data, or content that should not be sent to a third party in a query or target page.
 
@@ -401,7 +400,6 @@ For a typical flow, ask Harness to search a public topic, inspect the native `we
 
 A 402, 429, offline failure, timeout, or 5xx remains distinct and does not open invalid-Key recovery.
 
-![Chinese-language Modellix recovery dialog after an invalid API Key with an empty field and Configure later action](../assets/credential-recovery.webp)
 
 ## Accessibility, keyboard, and responsive behavior
 
@@ -425,7 +423,6 @@ Fields use real labels; help and errors are linked through stable relationships,
 - Harness semantic tokens adapt the UI to light, dark, and Windows forced-colors modes.
 - `prefers-reduced-motion: reduce` disables unnecessary animation and transitions.
 
-![English-language Modellix Design in a single-column layout at 320 pixels with the workspace above Results](../assets/design-mobile-en.webp)
 
 ## Cost and security checklist
 
@@ -520,21 +517,18 @@ Uninstallation does not promise to delete upstream Modellix tasks, external envi
 
 ## Included screenshots and safe-capture checklist
 
-These images were captured in an isolated acceptance profile and checked for Secrets. Most plugin copy is Chinese; `design-mobile-en.webp` and `llm-model-selector.webp` use English Harness chrome, while `web-tools.webp` uses English Harness chrome around a Chinese public-documentation request and response. Both guides reuse the same safe set with language-appropriate alt text:
+These six English images were captured full-screen at 1920×889 from the real configured Harness profile and checked for Secrets. The Chinese guide uses a separate six-image Chinese set of the same workflows. The live session exercised the real Modellix catalog, parameter assistant, `gpt-image-2`, LLM, Search, and Fetch:
 
 | Suggested file | Alt text | Capture focus |
 | --- | --- | --- |
-| `docs/assets/onboarding-defaults.webp` | Chinese-language Modellix first-time setup dialog with an empty API Key field and Design, LLM, and Web switches enabled | Empty password field, three default switches, Configure later and Save actions |
-| `docs/assets/settings-ready.webp` | Chinese-language Modellix settings showing a verified Credential, three feature switches, and LLM catalog status | Show configured status only, never the Key |
-| `docs/assets/design-desktop.webp` | Chinese-language Modellix Design desktop layout with model, prompt, and parameters on the left and generation results on the right | 1440px, generic prompt, non-sensitive result |
-| `docs/assets/design-proposal.webp` | Chinese-language Design parameter proposal showing before-and-after changes with Apply and Reject actions | No personal data; make clear that a proposal does not generate automatically |
-| `docs/assets/design-results-media.webp` | Chinese-language Design results pane showing the image created during real acceptance, its expiry, and download action | The image uses a public test prompt; video and audio passed separate real API acceptance and are not mixed into this screenshot |
-| `docs/assets/design-mobile-en.webp` | English-language Modellix Design in a single-column layout at 320 pixels with the workspace above Results | 320px, longest English copy, no clipped key action, and visible English localization |
-| `docs/assets/credential-recovery.webp` | Chinese-language Modellix recovery dialog after an invalid API Key with an empty field and Configure later action | Simulated 401 only; never show a real Key |
-| `docs/assets/llm-model-selector.webp` | English-language Harness model selector expanded to the Modellix provider with models synchronized from the live catalog | Show only public model names, with no account or call content |
-| `docs/assets/web-tools.webp` | English-language Harness conversation showing native web_search and web_fetch completed for a Chinese public-documentation request | Use public documentation; do not show private URLs, Cookies, or request details |
+| `docs/assets/settings-ready-en.webp` | English Modellix settings with a verified Credential and live LLM catalog | Shows status and source only, never the stored Key |
+| `docs/assets/design-desktop-en.webp` | English Modellix Design two-pane workspace using the live `gpt-image-2` Schema | Full-screen desktop layout and public model names |
+| `docs/assets/design-proposal-en.webp` | English real parameter proposal with Reject and Apply actions | A billed LLM proposal that does not submit media |
+| `docs/assets/design-results-media-en.webp` | English result pane with the real 1536×1024 acceptance image | One billed image POST, visible expiry, enlargement, and download actions |
+| `docs/assets/llm-model-selector-en.webp` | English Harness model selector populated from the live Modellix catalog | Public model names only |
+| `docs/assets/web-tools-en.webp` | English Harness chrome with real Modellix Search and Fetch results | Public official documentation only; no request internals |
 
-These screenshots show only an empty Key, an explicitly fake Key, public model names, public URLs, and generic test prompts. The real Key was read directly by the acceptance process and never entered the browser, screenshots, Network/HAR, Console, Credential files, or persistent recordings. Future screenshot updates must preserve the same rule.
+The Credential was already stored write-only in the local Harness service. The capture process never read it or opened a request inspector, and no Key, Network/HAR, Console, Credential file, Cookie, or private URL appears in these screenshots. Future screenshot updates must preserve the same rule.
 
 ## References
 

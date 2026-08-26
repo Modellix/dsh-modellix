@@ -1,10 +1,14 @@
 [
-  "docs/assets/onboarding-defaults.webp",
-  "docs/assets/settings-ready.webp",
-  "docs/assets/design-desktop.webp",
-  "docs/assets/design-proposal.webp",
-  "docs/assets/design-results-media.webp",
-  "docs/assets/design-mobile-en.webp",
-  "docs/assets/llm-model-selector.webp",
-  "docs/assets/web-tools.webp"
+  "docs/assets/settings-ready-en.webp",
+  "docs/assets/settings-ready-zh.webp",
+  "docs/assets/design-desktop-en.webp",
+  "docs/assets/design-desktop-zh.webp",
+  "docs/assets/design-proposal-en.webp",
+  "docs/assets/design-proposal-zh.webp",
+  "docs/assets/design-results-media-en.webp",
+  "docs/assets/design-results-media-zh.webp",
+  "docs/assets/llm-model-selector-en.webp",
+  "docs/assets/llm-model-selector-zh.webp",
+  "docs/assets/web-tools-en.webp",
+  "docs/assets/web-tools-zh.webp"
 ]

@@ -6,7 +6,7 @@ A Modellix Profile Bundle for [DeepSeek Harness](https://github.com/deepseek-ai/
 
 > Harness and this plugin currently use prerelease interfaces. Before upgrading Harness, check this package's peer dependencies and [CHANGELOG](CHANGELOG.md).
 
-![Chinese-language Modellix Design desktop layout with model, prompt, and parameters on the left and generation results on the right](docs/assets/design-desktop.webp)
+![English Modellix Design desktop layout in a real Harness session, with model and parameters on the left and results on the right](docs/assets/design-desktop-en.webp)
 
 ## Feature overview
 
@@ -47,7 +47,7 @@ You can also build a tarball from trusted source and install the artifact:
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.1.1.tgz
 ```
 
 Installing TypeScript source directly from Git requires the installation phase to produce `lib/`. Until the package provides a verified `prepare` flow, use the published package or a local tarball.
@@ -142,21 +142,18 @@ Uninstalling the plugin does not promise to remove external environment variable
 - [Complete English user guide](docs/en-US/USER_GUIDE.md)
 - [Chinese README](README.zh-CN.md)
 
-The repository includes nine safety-reviewed UI screenshots. None contains a real account, Key, Network request details, HAR, or Credential file. Both languages reuse the same images. Most plugin copy is Chinese; `design-mobile-en.webp` and `llm-model-selector.webp` use English Harness chrome, while `web-tools.webp` uses English Harness chrome around a Chinese public-documentation request and response:
+The repository includes six English full-screen screenshots captured from a real configured Harness session. The Chinese guide uses a separate six-image Chinese set of the same workflows. The captures use the live Modellix catalog, a real Schema-constrained parameter proposal, one completed `gpt-image-2` result, a real Modellix LLM turn, and real native Web Search/Fetch. None contains an API Key, Network request details, HAR, or Credential file:
 
 | Suggested file | Alt text |
 | --- | --- |
-| `docs/assets/onboarding-defaults.webp` | Chinese-language Modellix first-time setup dialog with an empty API Key field and Design, LLM, and Web switches enabled |
-| `docs/assets/settings-ready.webp` | Chinese-language Modellix settings showing a verified Credential, three feature switches, and LLM catalog status |
-| `docs/assets/design-desktop.webp` | Chinese-language Modellix Design desktop layout with model, prompt, and parameters on the left and generation results on the right |
-| `docs/assets/design-proposal.webp` | Chinese-language Design parameter proposal showing before-and-after changes with Apply and Reject actions |
-| `docs/assets/design-results-media.webp` | Chinese-language Design results pane with the image created during real acceptance, its expiry, and download action |
-| `docs/assets/design-mobile-en.webp` | English-language Modellix Design in a single-column layout at 320 pixels with the workspace above Results |
-| `docs/assets/credential-recovery.webp` | Chinese-language Modellix recovery dialog after an invalid API Key with an empty field and Configure later action |
-| `docs/assets/llm-model-selector.webp` | English-language Harness model selector expanded to the Modellix provider with models synchronized from the live catalog |
-| `docs/assets/web-tools.webp` | English-language Harness conversation showing native web_search and web_fetch completed by the Modellix provider for a Chinese public-documentation request |
+| `docs/assets/settings-ready-en.webp` | English Modellix settings with a verified local Credential, all three feature switches, and 26 live LLM models |
+| `docs/assets/design-desktop-en.webp` | English Modellix Design two-pane desktop workspace using the live `gpt-image-2` Schema |
+| `docs/assets/design-proposal-en.webp` | English real parameter proposal with Schema-valid before/after values and explicit Reject/Apply actions |
+| `docs/assets/design-results-media-en.webp` | English result pane with the real 1536×1024 image, expiry, enlargement, and download actions |
+| `docs/assets/llm-model-selector-en.webp` | English Harness model selector populated from the live Modellix LLM catalog |
+| `docs/assets/web-tools-en.webp` | English Harness chrome showing real Modellix Search and Fetch results for public official documentation |
 
-Use only an empty Key or an explicitly fake Key, a generic prompt, and results without personal information. Do not capture Network, HAR, Console, Credential files, or any real-Secret flow.
+The Credential is shown only as a write-only configured status. Never open the Key editor, Network, HAR, Console, Credential files, Cookies, or request details while capturing a real session.
 
 ## Current limitations
 
@@ -181,7 +178,7 @@ pnpm run verify:node22-install
 pnpm run verify:release:static
 ```
 
-`pnpm run check` runs environment verification, type checking, lint, the complete unit/contract suite, global hard coverage thresholds, and file-specific regression floors for the Host runtime and Design parameter planner. `verify:pack` checks the exact artifact allowlist, bilingual documentation, nine metadata-free WebP screenshots by actually decoding them, entries, embedded Source Map source, and sensitive-file exclusions. `verify:fresh-install` installs the final tarball in a temporary project, loads Host, executes the Client factory, checks subpath exports, and compiles consumer type smokes. `verify:node22-install` repeats the tarball runtime smoke with an explicitly configured or NVM-discovered Node.js `^22.19.0` binary and fails instead of silently skipping when none exists. `pnpm run verify:release:static` chains these static gates with the production dependency audit.
+`pnpm run check` runs environment verification, type checking, lint, the complete unit/contract suite, global hard coverage thresholds, and file-specific regression floors for the Host runtime and Design parameter planner. `verify:pack` checks the exact artifact allowlist, bilingual documentation, twelve locale-specific metadata-free WebP screenshots by actually decoding them, entries, embedded Source Map source, and sensitive-file exclusions. `verify:fresh-install` installs the final tarball in a temporary project, loads Host, executes the Client factory, checks subpath exports, and compiles consumer type smokes. `verify:node22-install` repeats the tarball runtime smoke with an explicitly configured or NVM-discovered Node.js `^22.19.0` binary and fails instead of silently skipping when none exists. `pnpm run verify:release:static` chains these static gates with the production dependency audit.
 
 ### Complete release evidence gate
 
@@ -192,7 +189,7 @@ Use `pnpm run verify:release` for an actual release. First commit the final code
   "version": 1,
   "kind": "browser",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {
@@ -216,7 +213,7 @@ Real API/Agent evidence must cover catalogs, parameter planning, all three media
   "version": 1,
   "kind": "api-agent",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {

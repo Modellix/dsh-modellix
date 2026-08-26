@@ -6,7 +6,7 @@
 
 > Harness 与本插件当前都使用预发布接口。升级 Harness 前，请核对本包的 peer dependencies 和 [CHANGELOG](CHANGELOG.md)。
 
-![Modellix Design 桌面布局，左侧为模型、提示词和参数，右侧为生成结果列表](docs/assets/design-desktop.webp)
+![真实 Harness 会话中的中文 Modellix Design 桌面布局，左侧为模型与参数，右侧为结果](docs/assets/design-desktop-zh.webp)
 
 ## 功能概览
 
@@ -47,7 +47,7 @@ dsh --profile web
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.1.1.tgz
 ```
 
 直接从 Git 安装 TypeScript 源码要求安装阶段能生成 `lib/`。包未提供经过验证的 `prepare` 流程时，请使用已发布包或本地 tarball。
@@ -142,21 +142,18 @@ dsh --profile web
 - [Complete English user guide](docs/en-US/USER_GUIDE.md)
 - [English README](README.md)
 
-当前仓库已收录 9 张经过安全检查的界面截图；不包含真实账户、Key、Network 请求详情、HAR 或 Credential 文件。中英文文档复用同一组图片。多数插件文案使用中文；`design-mobile-en.webp` 和 `llm-model-selector.webp` 使用英文 Harness 界面，`web-tools.webp` 则在英文 Harness 界面中展示中文公开文档请求与回答：
+当前仓库包含 6 张从真实已配置 Harness 会话截取的中文全屏图，英文指南另用同流程的 6 张英文图。截图使用实时 Modellix 目录、真实 Schema 约束参数提议、一次已完成的 `gpt-image-2` 结果、真实 Modellix LLM 调用与原生 Web Search/Fetch；不含 API Key、Network 请求详情、HAR 或 Credential 文件：
 
 | 建议文件 | Alt 文本 |
 | --- | --- |
-| `docs/assets/onboarding-defaults.webp` | Modellix 首次配置弹窗，API Key 输入框为空，Design、LLM 和 Web 开关均开启 |
-| `docs/assets/settings-ready.webp` | Modellix 设置页显示已验证 Credential、三个功能开关和 LLM 目录状态 |
-| `docs/assets/design-desktop.webp` | Modellix Design 桌面布局，左侧为模型、提示词和参数，右侧为生成结果列表 |
-| `docs/assets/design-proposal.webp` | Design 参数提议卡显示待确认的前后差异和应用、拒绝操作 |
-| `docs/assets/design-results-media.webp` | Design 结果区显示真实验收生成的图片结果、有效期和下载入口 |
-| `docs/assets/design-mobile-en.webp` | 英文 Modellix Design 在 320 像素宽度下使用单列布局，操作区位于结果区上方 |
-| `docs/assets/credential-recovery.webp` | API Key 无效后的 Modellix 恢复弹窗，输入框为空并提供稍后处理 |
-| `docs/assets/llm-model-selector.webp` | 英文 Harness 模型选择器展开 Modellix Provider，并列出从实时目录同步的多个 LLM 模型 |
-| `docs/assets/web-tools.webp` | 英文 Harness 对话中，Modellix Provider 为中文公开文档请求完成原生 web_search 与 web_fetch |
+| `docs/assets/settings-ready-zh.webp` | 中文 Modellix 设置页显示已验证本机 Credential、三个功能开关和 26 个实时 LLM 模型 |
+| `docs/assets/design-desktop-zh.webp` | 中文 Modellix Design 双栏桌面工作区，使用实时 `gpt-image-2` Schema |
+| `docs/assets/design-proposal-zh.webp` | 中文真实参数提议，显示 Schema 合法的前后值和拒绝、应用操作 |
+| `docs/assets/design-results-media-zh.webp` | 中文结果区显示真实 1536×1024 图片、有效期、原图和下载操作 |
+| `docs/assets/llm-model-selector-zh.webp` | 中文 Harness 模型选择器显示实时 Modellix LLM 目录 |
+| `docs/assets/web-tools-zh.webp` | 中文 Harness 中真实完成的 Modellix Search 与 Fetch 公开文档结果 |
 
-拍摄时只使用空 Key 或明确的假 Key，使用通用提示词和无个人信息的结果；不要拍摄 Network、HAR、Console、Credential 文件或真实 Secret 场景。
+Credential 只显示 write-only 的已配置状态。拍摄真实会话时，禁止打开 Key 编辑器、Network、HAR、Console、Credential 文件、Cookie 或请求详情。
 
 ## 当前限制
 
@@ -181,7 +178,7 @@ pnpm run verify:node22-install
 pnpm run verify:release:static
 ```
 
-`pnpm run check` 依次执行环境、类型、lint、全量单元/契约测试、全局覆盖率硬门槛以及 Host runtime 和 Design 参数规划器的文件级回归下限；`verify:pack` 验证精确的制品白名单、双语文档、9 张经过真实解码且不含 metadata 的共享 WebP 截图、入口、Source Map 内嵌源码和敏感文件排除；`verify:fresh-install` 在临时项目中安装最终 tarball，并实际加载 Host、执行 Client factory、检查子路径 exports 和消费端类型；`verify:node22-install` 使用显式指定或 NVM 中自动发现的 Node.js `^22.19.0` 再执行 tarball runtime smoke，找不到兼容版本时失败而不是跳过。`pnpm run verify:release:static` 串联以上静态门禁与生产依赖审计。
+`pnpm run check` 依次执行环境、类型、lint、全量单元/契约测试、全局覆盖率硬门槛以及 Host runtime 和 Design 参数规划器的文件级回归下限；`verify:pack` 验证精确的制品白名单、双语文档、12 张按语言分离且经过真实解码、不含 metadata 的 WebP 截图、入口、Source Map 内嵌源码和敏感文件排除；`verify:fresh-install` 在临时项目中安装最终 tarball，并实际加载 Host、执行 Client factory、检查子路径 exports 和消费端类型；`verify:node22-install` 使用显式指定或 NVM 中自动发现的 Node.js `^22.19.0` 再执行 tarball runtime smoke，找不到兼容版本时失败而不是跳过。`pnpm run verify:release:static` 串联以上静态门禁与生产依赖审计。
 
 ### 完整发布 Evidence 门禁
 
@@ -192,7 +189,7 @@ pnpm run verify:release:static
   "version": 1,
   "kind": "browser",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {
@@ -216,7 +213,7 @@ pnpm run verify:release:static
   "version": 1,
   "kind": "api-agent",
   "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "package": { "name": "dsh-modellix", "version": "0.1.1" },
   "commit": "<current-40-character-lowercase-git-head>",
   "completedAt": "<canonical-utc-iso-8601>",
   "checks": {

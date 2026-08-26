@@ -63,17 +63,16 @@ describe("package verification support", () => {
     ).toThrow(/package-relative or HTTPS/u);
   });
 
-  it("requires one README hero and the complete screenshot set in both guides", () => {
-    const guide = SCREENSHOT_FILES.map((path) => {
-      const reference = posix.relative("docs/en-US", path);
-      return `![Screenshot](${reference})`;
-    }).join("\n");
-    const documents = {
-      "README.md": "![Design](docs/assets/design-desktop.webp)",
-      "README.zh-CN.md": "![Design](docs/assets/design-desktop.webp)",
-      "docs/en-US/USER_GUIDE.md": guide,
-      "docs/zh-CN/USER_GUIDE.md": guide,
-    };
+  it("requires locale-specific README heroes and screenshot sets", () => {
+    const documents = Object.fromEntries(
+      Object.entries(DOCUMENTATION_SCREENSHOT_RULES).map(([document, paths]) => [
+        document,
+        paths.map((path) => {
+          const reference = posix.relative(posix.dirname(document), path);
+          return `![Screenshot](${reference})`;
+        }).join("\n"),
+      ]),
+    );
 
     expect(
       verifyDocumentationImages(documents, new Set(SCREENSHOT_FILES)),

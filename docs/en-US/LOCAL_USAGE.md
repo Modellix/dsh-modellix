@@ -42,7 +42,7 @@ pnpm run verify:pack
 pnpm pack
 ```
 
-The repository root will contain a file such as `dsh-modellix-0.1.0.tgz`. Do not ask DSH to install the unbuilt TypeScript checkout directly.
+The repository root will contain a file such as `dsh-modellix-0.1.1.tgz`. Do not ask DSH to install the unbuilt TypeScript checkout directly.
 
 ## 3. Create an isolated local Harness environment
 
@@ -60,7 +60,7 @@ This affects only the current PowerShell process and its children. Omit this ste
 Install the tarball into the `web` profile and inspect the merged configuration:
 
 ```powershell
-dsh plugin --profile web add .\dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
 dsh --profile web --dump-config
 ```
 
@@ -135,7 +135,7 @@ After source changes:
 Set-Location 'D:\work\maas\githup\dsh-modellix'
 pnpm run verify:pack
 pnpm pack
-dsh plugin --profile web add .\dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
 dsh --profile web --dump-config
 dsh --profile web --no-open
 ```

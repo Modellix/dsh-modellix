@@ -42,7 +42,7 @@ pnpm run verify:pack
 pnpm pack
 ```
 
-完成后，仓库根目录会生成类似 `dsh-modellix-0.1.0.tgz` 的文件。不要直接把未构建的 TypeScript 源码交给 DSH 安装。
+完成后，仓库根目录会生成类似 `dsh-modellix-0.1.1.tgz` 的文件。不要直接把未构建的 TypeScript 源码交给 DSH 安装。
 
 ## 3. 创建独立的本地 Harness 环境
 
@@ -60,7 +60,7 @@ New-Item -ItemType Directory -Force -Path $env:DSH_HOME | Out-Null
 把刚生成的 tarball 安装到 `web` Profile：
 
 ```powershell
-dsh plugin --profile web add .\dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
 dsh --profile web --dump-config
 ```
 
@@ -135,7 +135,7 @@ dsh --profile web --no-open
 Set-Location 'D:\work\maas\githup\dsh-modellix'
 pnpm run verify:pack
 pnpm pack
-dsh plugin --profile web add .\dsh-modellix-0.1.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
 dsh --profile web --dump-config
 dsh --profile web --no-open
 ```

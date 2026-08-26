@@ -11,26 +11,32 @@ export const DOCUMENTATION_FILES = Object.freeze([
 ])
 
 export const SCREENSHOT_FILES = Object.freeze([
-  'docs/assets/credential-recovery.webp',
-  'docs/assets/design-desktop.webp',
-  'docs/assets/design-mobile-en.webp',
-  'docs/assets/design-proposal.webp',
-  'docs/assets/design-results-media.webp',
-  'docs/assets/llm-model-selector.webp',
-  'docs/assets/onboarding-defaults.webp',
-  'docs/assets/settings-ready.webp',
-  'docs/assets/web-tools.webp',
+  'docs/assets/design-desktop-en.webp',
+  'docs/assets/design-desktop-zh.webp',
+  'docs/assets/design-proposal-en.webp',
+  'docs/assets/design-proposal-zh.webp',
+  'docs/assets/design-results-media-en.webp',
+  'docs/assets/design-results-media-zh.webp',
+  'docs/assets/llm-model-selector-en.webp',
+  'docs/assets/llm-model-selector-zh.webp',
+  'docs/assets/settings-ready-en.webp',
+  'docs/assets/settings-ready-zh.webp',
+  'docs/assets/web-tools-en.webp',
+  'docs/assets/web-tools-zh.webp',
 ])
+
+const ENGLISH_SCREENSHOTS = Object.freeze(SCREENSHOT_FILES.filter(path => path.endsWith('-en.webp')))
+const CHINESE_SCREENSHOTS = Object.freeze(SCREENSHOT_FILES.filter(path => path.endsWith('-zh.webp')))
 
 /**
  * READMEs carry one representative product view; the detailed bilingual
  * guides are the durable home for the complete screenshot set.
  */
 export const DOCUMENTATION_SCREENSHOT_RULES = Object.freeze({
-  'README.md': Object.freeze(['docs/assets/design-desktop.webp']),
-  'README.zh-CN.md': Object.freeze(['docs/assets/design-desktop.webp']),
-  'docs/en-US/USER_GUIDE.md': SCREENSHOT_FILES,
-  'docs/zh-CN/USER_GUIDE.md': SCREENSHOT_FILES,
+  'README.md': Object.freeze(['docs/assets/design-desktop-en.webp']),
+  'README.zh-CN.md': Object.freeze(['docs/assets/design-desktop-zh.webp']),
+  'docs/en-US/USER_GUIDE.md': ENGLISH_SCREENSHOTS,
+  'docs/zh-CN/USER_GUIDE.md': CHINESE_SCREENSHOTS,
 })
 
 const TOKEN_PATTERNS = Object.freeze([
