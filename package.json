@@ -68,6 +68,7 @@
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "lint": "oxlint .",
     "test": "vitest run",
+    "test:real:modellix": "pnpm run build && node scripts/run-real-modellix-e2e.mjs",
     "test:coverage": "vitest run --coverage && node scripts/verify-critical-coverage.mjs",
     "build:host": "tsdown --env.DSH_BUILD_FACE host",
     "build:client": "tsdown --env.DSH_BUILD_FACE client",
