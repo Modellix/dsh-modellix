@@ -50,11 +50,11 @@ export function ModellixSettingsSection({
   const [announcement, setAnnouncement] = useState("");
 
   useEffect(() => {
-    if (state.status !== "idle") return;
+    if (controller.store.getSnapshot().status !== "idle") return;
     const abort = new AbortController();
     void controller.load(abort.signal);
     return () => abort.abort();
-  }, [controller, state.status]);
+  }, [controller]);
 
   useEffect(() => {
     if (snapshot !== null) setServices(snapshot.services);

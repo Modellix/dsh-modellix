@@ -23,11 +23,11 @@ export function ModellixOnboarding({
   const [open, setOpen] = useState(true);
 
   useEffect(() => {
-    if (state.status !== "idle") return;
+    if (controller.store.getSnapshot().status !== "idle") return;
     const abort = new AbortController();
     void controller.load(abort.signal);
     return () => abort.abort();
-  }, [controller, state.status]);
+  }, [controller]);
 
   const snapshot = state.data;
   useEffect(() => {

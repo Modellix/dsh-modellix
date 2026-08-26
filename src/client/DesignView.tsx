@@ -79,13 +79,16 @@ export function ModellixDesignView({
   }, [controller]);
 
   useEffect(() => {
-    if (snapshot?.credentialReady !== false || settingsState.status !== "idle") {
+    if (
+      snapshot?.credentialReady !== false ||
+      settingsController.store.getSnapshot().status !== "idle"
+    ) {
       return;
     }
     const abort = new AbortController();
     void settingsController.load(abort.signal);
     return () => abort.abort();
-  }, [settingsController, settingsState.status, snapshot?.credentialReady]);
+  }, [settingsController, snapshot?.credentialReady]);
 
   useEffect(() => {
     const draft = snapshot?.draft;
