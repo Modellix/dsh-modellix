@@ -78,11 +78,11 @@ API Key 可以来自两处：
 6. 检查参数和计费提示后，点击一次“确认并生成”。计费 POST 不自动重试；只读任务状态查询会在有限范围内安全重试。
 7. 右侧结果区按“进行中 / 已完成 / 诊断”展示记录，支持图片放大、视频和音频播放以及安全下载。
 
-例如，选择一个当前 Schema 提供 `quality` 和 `size` 参数的可用图片模型，然后输入：
+例如，选择一个当前 Schema 提供 `quality` 和 `size` 参数的可用图片模型，然后输入本次验收提示词：
 
-> 一座漂浮在云海之上的未来东方城市，清晨金色体积光穿过层叠云雾，青瓷曲面与钛金结构相互交织，空中花园、瀑布和轻盈的飞行器形成丰富前中后景；电影级广角构图，真实材质，细腻光影，克制的青蓝与暖金配色，充满诗意与尺度感，不含文字、标志或水印。
+> A premium editorial architectural photograph of a quiet cliffside library above a misty alpine lake at blue hour, carved pale stone arches, warm amber reading lamps, one thoughtful reader, subtle greenery, natural reflections, cinematic but realistic lighting, restrained navy and ivory palette, precise composition, no text, no logo.
 
-这就是文档验收图片实际使用的提示词，并非简化占位示例。
+这就是文档中真实 API 图片实际使用的完整提示词，并非简化占位示例。下方截图是在真实 Design 结果列表显示任务完成后拍摄的。
 
 把 `quality` 设为 `high`、`size` 设为 `1536x1024`，其他字段保留模型当前默认值。可以直接精准修改这两个控件，也可以让参数助手生成两项变更提议，再检查差异并应用。参数提议可能产生 LLM 用量，但不会生成图片；只有最后一次“确认并生成”会发起计费媒体请求，插件不会自动重试。若所选模型的实时 Schema 没有这两个字段，不要手动添加，应只使用该模型实际公开的参数和值。
 
@@ -229,6 +229,18 @@ pnpm run verify:release:static
   "billedCallsExplicitlyAuthorized": true
 }
 ```
+
+需要用真实服务生成这份 evidence 时，先在独立 Web Profile 中完成并核对一次使用 Modellix 模型的 DSH Agent 会话；随后由验收进程直接从受控环境、文件或 Credential 提供 `MODELLIX_API_KEY`，并只设置以下非 Secret 控制项后执行 `pnpm run test:real:modellix`：
+
+```powershell
+$env:MODELLIX_ALLOW_BILLED_E2E = '1'
+$env:MODELLIX_REAL_AGENT_ATTESTED = '1'
+$env:MODELLIX_REAL_E2E_OUTPUT_DIR = 'D:\outside-repo\modellix-real-results'
+$env:MODELLIX_API_AGENT_E2E_EVIDENCE_FILE = 'D:\outside-repo\api-agent-evidence.json'
+pnpm run test:real:modellix
+```
+
+该脚本会真实读取鉴权目录和 Schema、完成参数规划，对图片、视频、音频各提交一次计费 POST，以有限只读请求轮询任务，调用真实 Web Search/Fetch，在仓库外保存媒体供独立解码检查，再生成无 Secret evidence。缺少显式计费授权或此前的 Agent 验收证明时，脚本拒绝运行；Key 既不作为命令参数传入，也不会被脚本输出。
 
 通过绝对路径提供两份文件后运行门禁；路径本身可以进入环境变量，API Key 不可以：
 

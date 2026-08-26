@@ -107,6 +107,8 @@ dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
 }
 ```
 
+真实执行时，先在独立 Web Profile 中完成一次使用 Modellix 模型的 DSH Agent 会话。让验收进程从受控来源直接提供 `MODELLIX_API_KEY`，设置 `MODELLIX_ALLOW_BILLED_E2E=1`、`MODELLIX_REAL_AGENT_ATTESTED=1`，并把 `MODELLIX_REAL_E2E_OUTPUT_DIR` 与 `MODELLIX_API_AGENT_E2E_EVIDENCE_FILE` 指向仓库外绝对路径，然后执行 `pnpm run test:real:modellix`。脚本不使用 Mock transport：它会真实读取目录和 Schema、分别提交一次图片/视频/音频 POST、有限轮询任务、调用真实 Web Search/Fetch、保存下载媒体供独立解码检查，并写入无 Secret evidence；Key 不接受命令行传参。
+
 用绝对路径运行完整门禁：
 
 ```sh
@@ -278,14 +280,14 @@ Design 使用当前 Modellix 模型目录，不内置一份假定永远有效的
 
 检查差异后选择“应用变更”或“拒绝”。有冲突时必须先解决；提议生成后若当前参数或 Schema 已改变，过期提议会被拒绝，请重新生成提议。
 
-### Design 完整示例：精美东方未来城市
+### Design 完整示例：精美湖畔悬崖图书馆
 
 下面是一套可复现的图片生成流程，但实际参数必须始终以所选模型的实时 Schema 为准：
 
 | 输入 | 示例值 |
 | --- | --- |
 | 模型 | `openai/gpt-image-2`，仅在当前目录显示可用且实时 Schema 提供下列字段时使用 |
-| Prompt（真实验收使用） | `一座漂浮在云海之上的未来东方城市，清晨金色体积光穿过层叠云雾，青瓷曲面与钛金结构相互交织，空中花园、瀑布和轻盈的飞行器形成丰富前中后景；电影级广角构图，真实材质，细腻光影，克制的青蓝与暖金配色，充满诗意与尺度感，不含文字、标志或水印。` |
+| Prompt（真实验收使用） | `A premium editorial architectural photograph of a quiet cliffside library above a misty alpine lake at blue hour, carved pale stone arches, warm amber reading lamps, one thoughtful reader, subtle greenery, natural reflections, cinematic but realistic lighting, restrained navy and ivory palette, precise composition, no text, no logo.` |
 | `quality` | `high` |
 | `size` | `1536x1024` |
 
@@ -296,6 +298,8 @@ Design 使用当前 Modellix 模型目录，不内置一份假定永远有效的
 5. 只点击一次“确认并生成”，然后在右侧结果区跟踪任务。
 
 参数提议可能产生独立 LLM 用量，最终媒体请求也可能计费。媒体请求严格只提交一次，插件不会自动重试。如果实时 Schema 没有 `quality`、`size` 或示例值，不要手动添加或强行提交，只能使用该模型实际公开的控件和值。
+
+2026-08-26 的真实验收由受控进程读取凭据，Key 没有进入浏览器。验收完成了下方所示的 `openai/gpt-image-2` 高质量 Design 流程、6 秒 768P 的 `minimax/hailuo-2.3-t2v` 任务、`alibaba/qwen-audio-3.0-tts-plus` 旁白、使用 Modellix 模型的 DSH Agent 会话、真实 Web Search/Fetch，以及独立的原生 `deepseek-official` DSH Agent 基线调用。下载后复核的视频为 H.264、1366×768、5.875 秒；音频为 22.05 kHz 单声道 MP3、7.94 秒。发布 evidence 保存在仓库外，且不含任何 Secret。
 
 ### 确认与一次性计费提交
 

@@ -107,6 +107,8 @@ Real API/Agent evidence must cover catalogs, parameter planning, image, video, a
 }
 ```
 
+For a live run, first complete one Modellix-backed DSH Agent turn in an isolated Web profile. Have the acceptance process provide `MODELLIX_API_KEY` directly from a controlled source, set `MODELLIX_ALLOW_BILLED_E2E=1`, `MODELLIX_REAL_AGENT_ATTESTED=1`, and absolute outside-repository paths in `MODELLIX_REAL_E2E_OUTPUT_DIR` and `MODELLIX_API_AGENT_E2E_EVIDENCE_FILE`, then run `pnpm run test:real:modellix`. The runner uses no Mock transport: it performs live catalogs and Schema planning, submits one image/video/audio POST each, uses bounded task reads, calls real Web Search/Fetch, saves downloaded media for independent decoding checks, and writes Secret-free evidence. It does not accept a Key on the command line.
+
 Run the complete gate with absolute paths:
 
 ```sh
@@ -278,14 +280,14 @@ This action:
 
 After review, select “Apply changes” or “Reject.” Resolve conflicts first. If parameters or the Schema changed after proposal creation, the stale proposal is rejected; create another proposal.
 
-### Worked Design example: an exquisite Eastern futuristic city
+### Worked Design example: a premium cliffside library
 
 Use this as a reproducible image-generation pattern, while treating the selected model's live Schema as authoritative:
 
 | Input | Example value |
 | --- | --- |
 | Model | `openai/gpt-image-2`, only when it is currently listed as available and its live Schema exposes the fields below |
-| Prompt used in acceptance | `一座漂浮在云海之上的未来东方城市，清晨金色体积光穿过层叠云雾，青瓷曲面与钛金结构相互交织，空中花园、瀑布和轻盈的飞行器形成丰富前中后景；电影级广角构图，真实材质，细腻光影，克制的青蓝与暖金配色，充满诗意与尺度感，不含文字、标志或水印。` |
+| Prompt used in acceptance | `A premium editorial architectural photograph of a quiet cliffside library above a misty alpine lake at blue hour, carved pale stone arches, warm amber reading lamps, one thoughtful reader, subtle greenery, natural reflections, cinematic but realistic lighting, restrained navy and ivory palette, precise composition, no text, no logo.` |
 | `quality` | `high` |
 | `size` | `1536x1024` |
 
@@ -296,6 +298,8 @@ Use this as a reproducible image-generation pattern, while treating the selected
 5. Select “Confirm and generate” once, then follow the task in the right results pane.
 
 The parameter proposal may incur separate LLM usage. The final media request is also potentially billed and is submitted exactly once; the plugin does not automatically retry it. If the live Schema does not expose `quality`, `size`, or either example value, do not add or force them—use only the controls and values advertised by that model.
+
+The 2026-08-26 real acceptance run used controlled credentials without exposing them to the browser. It completed the high-quality `openai/gpt-image-2` Design flow shown below, a 6-second 768P `minimax/hailuo-2.3-t2v` task, an `alibaba/qwen-audio-3.0-tts-plus` narration, a Modellix-backed DSH Agent turn, real Web Search/Fetch calls, and a separate native `deepseek-official` DSH Agent baseline. The downloaded video decoded as H.264 at 1366×768 and 5.875 seconds; the narration decoded as mono MP3 at 22.05 kHz and 7.94 seconds. Release evidence remains outside the repository and contains no Secret.
 
 ### Confirmation and one-shot billed submission
 

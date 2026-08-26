@@ -78,11 +78,11 @@ See the [user guide: first-time setup and Credentials](docs/en-US/USER_GUIDE.md#
 6. Review parameters and the billing notice, then select “Confirm and generate” once. The billed POST is never retried automatically; read-only task status checks use only bounded safe retries.
 7. The right results pane groups records as Running, Succeeded, or Diagnostics and supports enlarged images, video/audio playback, and safe downloads.
 
-For example, select an available image model whose live Schema exposes `quality` and `size`, then enter a prompt such as:
+For example, select an available image model whose live Schema exposes `quality` and `size`, then enter this acceptance prompt:
 
-> 一座漂浮在云海之上的未来东方城市，清晨金色体积光穿过层叠云雾，青瓷曲面与钛金结构相互交织，空中花园、瀑布和轻盈的飞行器形成丰富前中后景；电影级广角构图，真实材质，细腻光影，克制的青蓝与暖金配色，充满诗意与尺度感，不含文字、标志或水印。
+> A premium editorial architectural photograph of a quiet cliffside library above a misty alpine lake at blue hour, carved pale stone arches, warm amber reading lamps, one thoughtful reader, subtle greenery, natural reflections, cinematic but realistic lighting, restrained navy and ivory palette, precise composition, no text, no logo.
 
-This is the exact prompt used for the documented acceptance image. It describes a cinematic future Eastern city floating above a sea of clouds, with restrained blue-and-gold color, realistic materials, and no text, logos, or watermarks.
+This is the exact prompt used for the documented real-API image, not a placeholder. The screenshot below was captured after the task completed in the real Design results list.
 
 Set `quality` to `high` and `size` to `1536x1024`, leaving other fields at the model's current defaults. You can edit those controls directly or ask the parameter assistant to propose the two changes, then review and apply the diff. The proposal may incur LLM usage but does not generate an image. Only the final “Confirm and generate” action starts the billed media request, and the plugin does not retry it automatically. If the selected model does not advertise either field, do not add it manually—choose values and fields from that model's live Schema.
 
@@ -229,6 +229,18 @@ Real API/Agent evidence must cover catalogs, parameter planning, all three media
   "billedCallsExplicitlyAuthorized": true
 }
 ```
+
+To produce this evidence from live services, first complete and verify one Modellix-backed DSH Agent turn in an isolated Web profile. Then let the acceptance process supply `MODELLIX_API_KEY` directly from a controlled environment, file, or Credential and run `pnpm run test:real:modellix` with these non-secret controls:
+
+```powershell
+$env:MODELLIX_ALLOW_BILLED_E2E = '1'
+$env:MODELLIX_REAL_AGENT_ATTESTED = '1'
+$env:MODELLIX_REAL_E2E_OUTPUT_DIR = 'D:\outside-repo\modellix-real-results'
+$env:MODELLIX_API_AGENT_E2E_EVIDENCE_FILE = 'D:\outside-repo\api-agent-evidence.json'
+pnpm run test:real:modellix
+```
+
+The runner performs live authenticated catalogs and Schema planning, submits exactly one billed image, video, and audio POST, polls those tasks with bounded reads, executes real Web Search/Fetch, saves all media outside the repository for independent decoding checks, and writes Secret-free evidence. It refuses to run without both explicit billing authorization and the prior Agent attestation. It never supplies or accepts a Key as a command argument.
 
 Supply both absolute paths and run the gate. Paths may be environment variables; the API Key must not be:
 
