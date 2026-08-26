@@ -23,6 +23,7 @@ describe("core config", () => {
       web: true,
     });
     expect(config.credentialEpoch).toBe(0);
+    expect(config.services.design.retentionPolicy).toBe("metadata-only");
     expect(config.onboarding).toEqual({ status: "active", saveRecovery: null });
   });
 

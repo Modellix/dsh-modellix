@@ -26,7 +26,7 @@ export const PluginSettingsSchema: z<PluginConfig> = z.object({
   services: z.object({
     design: z.object({
       enabled: serviceToggle,
-      retentionPolicy: z.union(["retain-input", "metadata-only"]).default("retain-input"),
+      retentionPolicy: z.union(["retain-input", "metadata-only"]).default("metadata-only"),
       retentionPolicyRevision: z.natural().min(1).default(1),
       lastModel: z.union([modelId, z.const(null)]).default(null),
       recentModels: z.array(modelId).default([]),

@@ -140,7 +140,7 @@ export function createDefaultConfig(): PluginConfig {
     services: {
       design: {
         enabled: DEFAULT_TOGGLES.design,
-        retentionPolicy: "retain-input",
+        retentionPolicy: "metadata-only",
         retentionPolicyRevision: 1,
         lastModel: null,
         recentModels: [],
