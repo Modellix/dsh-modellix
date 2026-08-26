@@ -141,6 +141,26 @@ describe("PredictionClient", () => {
     expect(call?.[1]?.method).toBe("GET");
   });
 
+  it("keeps a bounded inline delay while exposing the full Retry-After deadline", async () => {
+    const fetchMock = vi.fn<FetchPort>().mockResolvedValue(
+      jsonResponse({ error: "slow down" }, 429, { "retry-after": "60" }),
+    );
+    const sleep = vi.fn<(delay: number) => Promise<void>>().mockResolvedValue();
+    const client = new PredictionClient({ fetch: fetchMock, sleep: { sleep } });
+
+    await expect(client.readTask({
+      taskId: "task-retry-after",
+      apiKey: "key-secret",
+      maxAttempts: 2,
+    })).rejects.toMatchObject({
+      code: "TASK_READ_FAILED",
+      status: 429,
+      retryAfterMs: 60_000,
+    });
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(5_000);
+  });
+
   it("never places API keys or prompts in logger events", async () => {
     const events: DesignLogEvent[] = [];
     const logger: LoggerPort = { write: (event) => events.push(event) };
@@ -195,6 +215,17 @@ describe("parsePredictionTask", () => {
         { kind: "audio" },
       ],
     });
+  });
+
+  it("rejects a response that exceeds the closed Design resource budget", () => {
+    expect(() => parsePredictionTask({
+      task_id: "task-many-results",
+      status: "completed",
+      resources: Array.from({ length: 257 }, (_, index) => ({
+        type: "image",
+        url: `https://cdn.example/result-${String(index)}.png`,
+      })),
+    })).toThrowError(DesignError);
   });
 });
 

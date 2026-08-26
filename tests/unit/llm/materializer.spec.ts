@@ -6,6 +6,7 @@ import {
   LlmSettingsMaterializer,
   planLlmRouteMaterialization,
   planLlmRouteRemoval,
+  reconcileLlmRouteLedgerAfterInterruption,
 } from "../../../src/llm/materializer.js";
 
 const catalog = [
@@ -74,6 +75,53 @@ describe("llm-pi-ai Modellix route materialization", () => {
       "openai/gpt-5.6-sol",
       "anthropic/claude-sonnet-5",
     ]);
+    expect(preserved.ledger.ownership).toBe("adopted");
+
+    const refreshedAgain = planLlmRouteMaterialization(
+      preserved.route,
+      [catalog[0]!],
+      preserved.ledger,
+    );
+    expect(refreshedAgain.route.models.map((model) => model.id)).toEqual([
+      "openai/gpt-5.6-sol",
+      "anthropic/claude-sonnet-5",
+    ]);
+    expect(refreshedAgain.ledger.entries.some((entry) =>
+      entry.kind === "model" && entry.key === "anthropic/claude-sonnet-5")).toBe(false);
+  });
+
+  it("downgrades a created route after user extension and preserves the extension on removal", () => {
+    const created = planLlmRouteMaterialization(undefined, catalog);
+    const extended = { ...created.route, userHeaderPolicy: "keep-me" };
+
+    const refreshed = planLlmRouteMaterialization(extended, catalog, created.ledger);
+    expect(refreshed.ledger.ownership).toBe("adopted");
+
+    const removal = planLlmRouteRemoval(refreshed.route, refreshed.ledger);
+    expect(removal).toMatchObject({
+      action: "set-route",
+      route: { userHeaderPolicy: "keep-me" },
+    });
+    expect(removal.route).not.toHaveProperty("apiKeyEnv");
+  });
+
+  it("does not claim compatible fields or models already present on an adopted route", () => {
+    const existing = {
+      apiKeyEnv: "MODELLIX_API_KEY",
+      displayName: "Modellix",
+      api: "openai-completions",
+      baseURL: "https://llm.modellix.ai/v1",
+      defaultInput: ["text"],
+      retryPolicy: { mode: "normal", maxRetries: 0 },
+      models: [{ id: "openai/gpt-5.6-sol", contextWindow: 12345 }],
+      userHeaderPolicy: "keep-me",
+    };
+    const adopted = planLlmRouteMaterialization(existing, catalog);
+    expect(adopted.ledger.ownership).toBe("adopted");
+
+    const removal = planLlmRouteRemoval(adopted.route, adopted.ledger);
+    expect(removal.action).toBe("set-route");
+    expect(removal.route).toEqual(existing);
   });
 
   it("removes a plugin-created route only while the whole route is unchanged", () => {
@@ -81,6 +129,34 @@ describe("llm-pi-ai Modellix route materialization", () => {
     expect(planLlmRouteRemoval(created.route, created.ledger).action).toBe("unset-route");
     expect(planLlmRouteRemoval({ ...created.route, timeoutMs: 123 }, created.ledger).action)
       .toBe("conflict");
+  });
+
+  it("keeps only previously proven entries after an interrupted materialization", () => {
+    const created = planLlmRouteMaterialization(undefined, catalog);
+    expect(reconcileLlmRouteLedgerAfterInterruption(created.route, created.ledger))
+      .toEqual(created.ledger);
+
+    const userChanged = {
+      ...created.route,
+      userHeaderPolicy: "keep-me",
+      models: created.route.models.map((model) => model.id === catalog[0]!.id
+        ? { ...model, name: "User label" }
+        : model),
+    };
+    const recovered = reconcileLlmRouteLedgerAfterInterruption(userChanged, created.ledger);
+    expect(recovered.ownership).toBe("adopted");
+    expect(recovered.entries.some((entry) => entry.kind === "model" && entry.key === catalog[0]!.id))
+      .toBe(false);
+    expect(recovered.entries.some((entry) => entry.kind === "model" && entry.key === catalog[1]!.id))
+      .toBe(true);
+    expect(recovered.entries.some((entry) => entry.key === "/userHeaderPolicy"))
+      .toBe(false);
+  });
+
+  it("does not claim an orphan route when no ownership was committed before the crash", () => {
+    const orphan = planLlmRouteMaterialization(undefined, catalog).route;
+    expect(reconcileLlmRouteLedgerAfterInterruption(orphan, EMPTY_LLM_ROUTE_LEDGER))
+      .toEqual(EMPTY_LLM_ROUTE_LEDGER);
   });
 
   it("uses the Settings revision as a CAS guard", async () => {
@@ -95,6 +171,24 @@ describe("llm-pi-ai Modellix route materialization", () => {
       op: "set",
       path: ["providers", "modellix"],
     })], 17);
+  });
+
+  it("prepares without writing and exposes the guarded apply revision", async () => {
+    const mutate = vi.fn(async () => undefined);
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => ({ revision: 23, value: { providers: {} }, user: { providers: {} } }),
+      mutate,
+    });
+    const prepared = await materializer.prepareMaterialization(catalog, EMPTY_LLM_ROUTE_LEDGER);
+
+    expect(prepared.changed).toBe(true);
+    expect(prepared.expectedSettingsRevision).toBe(23);
+    expect(mutate).not.toHaveBeenCalled();
+    await prepared.apply();
+    expect(mutate).toHaveBeenCalledWith([expect.objectContaining({
+      op: "set",
+      path: ["providers", "modellix"],
+    })], 23);
   });
 
   it("ignores schema-expanded effective defaults when the raw owned route is unchanged", async () => {

@@ -12,10 +12,19 @@ export const MODELLIX_SETTINGS_NAMESPACE = "modellix" as const;
 
 const modelId = z.string();
 const serviceToggle = z.boolean().default(true);
+const retentionPolicy = z.transform(
+  z.union(["retain-input", "metadata-only"]),
+  () => "metadata-only" as const,
+).default("metadata-only");
 const fingerprintEntry = z.object({
   kind: z.union(["field", "model"]).required(),
   key: z.string().required(),
   appliedFingerprint: z.string().required(),
+});
+const llmMaterializationRecovery = z.object({
+  operationId: z.string().required(),
+  startedAt: z.natural(),
+  expectedLlmSettingsRevision: z.natural(),
 });
 
 /** Serializable non-secret section. Host reads still pass through migrateConfig. */
@@ -26,7 +35,8 @@ export const PluginSettingsSchema: z<PluginConfig> = z.object({
   services: z.object({
     design: z.object({
       enabled: serviceToggle,
-      retentionPolicy: z.union(["retain-input", "metadata-only"]).default("metadata-only"),
+      // retain-input remains readable only so older settings can normalize.
+      retentionPolicy,
       retentionPolicyRevision: z.natural().min(1).default(1),
       lastModel: z.union([modelId, z.const(null)]).default(null),
       recentModels: z.array(modelId).default([]),
@@ -50,6 +60,10 @@ export const PluginSettingsSchema: z<PluginConfig> = z.object({
       appliedRouteFingerprint: z.union([z.string(), z.const(null)]).default(null),
       entries: z.array(fingerprintEntry).default([]),
     }),
+    materializationRecovery: z.union([
+      llmMaterializationRecovery,
+      z.const(null),
+    ]).default(null),
   }),
 }) as z<PluginConfig>;
 

@@ -92,6 +92,40 @@ describe("bounded response parsing", () => {
       controller.signal,
     )).rejects.toMatchObject({ name: "AbortError" });
   });
+
+  it("stops an oversized chunked body without Content-Length", async () => {
+    let canceled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(stream) {
+        stream.enqueue(new Uint8Array(80));
+        stream.enqueue(new Uint8Array(80));
+      },
+      cancel() {
+        canceled = true;
+      },
+    }));
+
+    await expect(readBoundedResponseJson(response, 100)).rejects.toMatchObject({
+      code: "BODY_TOO_LARGE",
+    });
+    expect(canceled).toBe(true);
+  });
+
+  it("cancels a stalled stream when the signal aborts after reading starts", async () => {
+    let canceled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        canceled = true;
+      },
+    }));
+    const controller = new AbortController();
+    const parsing = readBoundedResponseJson(response, 1_024, controller.signal);
+
+    controller.abort();
+
+    await expect(parsing).rejects.toMatchObject({ name: "AbortError" });
+    expect(canceled).toBe(true);
+  });
 });
 
 describe("bounded retry", () => {

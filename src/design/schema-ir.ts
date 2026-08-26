@@ -160,6 +160,13 @@ const BLOCKING_UNSUPPORTED_KEYS = new Set([
   "propertyNames",
 ]);
 
+/** Object keys with special JavaScript prototype semantics never enter the IR. */
+const UNSAFE_PROPERTY_NAMES = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
 interface ParserContext {
   readonly document: Readonly<Record<string, unknown>>;
   readonly diagnostics: SchemaDiagnostic[];
@@ -366,6 +373,16 @@ function compileField(
   depth: number,
   _sourceIndex = 0,
 ): UiField | null {
+  if (UNSAFE_PROPERTY_NAMES.has(key)) {
+    context.diagnostics.push({
+      code: "INVALID_KEYWORD",
+      path: `#${path}`,
+      keyword: "properties",
+      blocking: true,
+      message: "Schema property name is unsafe for a model parameter object",
+    });
+    return null;
+  }
   if (depth > context.limits.maxDepth) {
     addBudgetDiagnostic(path, "maximum schema depth", context);
     return null;
@@ -677,7 +694,10 @@ function mergeSchemas(
   const leftProperties = asRecord(left.properties);
   const rightProperties = asRecord(right.properties);
   if (leftProperties !== null || rightProperties !== null) {
-    const properties: Record<string, unknown> = { ...leftProperties };
+    const properties = Object.assign(
+      Object.create(null) as Record<string, unknown>,
+      leftProperties ?? {},
+    );
     for (const [key, value] of Object.entries(rightProperties ?? {})) {
       const existing = asRecord(properties[key]);
       const incoming = asRecord(value);
@@ -1164,7 +1184,7 @@ function jsonCompatible(value: unknown): JsonValue | undefined {
   if (object === null) {
     return undefined;
   }
-  const result: Record<string, JsonValue> = {};
+  const result = Object.create(null) as Record<string, JsonValue>;
   for (const [key, item] of Object.entries(object)) {
     const parsed = jsonCompatible(item);
     if (parsed === undefined) {

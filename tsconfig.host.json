@@ -22,6 +22,7 @@
   ],
   "exclude": [
     "src/client/**",
+    "tests/unit/client/**",
     "tests/browser/**"
   ]
 }

@@ -70,6 +70,50 @@ describe("CredentialBroker", () => {
     await expect(broker.validateCandidate("candidate-secret")).rejects.toBeInstanceOf(CredentialValidationError);
   });
 
+  it("bounds a chunked validation response without Content-Length", async () => {
+    let canceled = false;
+    const broker = new CredentialBroker({
+      credentials: credentialPort(),
+      initialCredentialEpoch: 0,
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(new Uint8Array(40 * 1_024));
+          stream.enqueue(new Uint8Array(40 * 1_024));
+        },
+        cancel() {
+          canceled = true;
+        },
+      })),
+    });
+
+    await expect(broker.validateCandidate("candidate-secret")).rejects.toMatchObject({
+      contract: { code: "MODELLIX_UNEXPECTED_RESPONSE" },
+    });
+    expect(canceled).toBe(true);
+  });
+
+  it("cancels a stalled validation body", async () => {
+    let canceled = false;
+    const controller = new AbortController();
+    const broker = new CredentialBroker({
+      credentials: credentialPort(),
+      initialCredentialEpoch: 0,
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        cancel() {
+          canceled = true;
+        },
+      })),
+    });
+    const validation = broker.validateCandidate("candidate-secret", controller.signal);
+
+    controller.abort();
+
+    await expect(validation).rejects.toMatchObject({
+      contract: { code: "MODELLIX_CANCELED" },
+    });
+    expect(canceled).toBe(true);
+  });
+
   it("serializes writes and rejects a stale plugin epoch", async () => {
     const credentials = credentialPort();
     const broker = new CredentialBroker({ credentials, initialCredentialEpoch: 5 });

@@ -2,8 +2,10 @@ import type { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
 import type {} from "@deepseek-ai/dsh-client-connection/client";
 import type {} from "@deepseek-ai/dsh-client-locale/client";
 import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
+import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
 
 import { DesignController, SettingsController } from "./store.js";
+import { CredentialRecoveryOverlay } from "./CredentialRecoveryOverlay.js";
 import { ModellixDesignView } from "./DesignView.js";
 import { en, MODELLIX_LOCALE_NAMESPACE, zh } from "./locales.js";
 import { ModellixOnboarding } from "./Onboarding.js";
@@ -30,6 +32,19 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(MODELLIX_LOCALE_NAMESPACE);
   const rpc = new ModellixRpcClient(ctx.connection.rpc);
   const settingsController = new SettingsController(rpc);
+
+  ctx.slots.inject("shell.overlay", () =>
+    ctx.slots.register(
+      {
+        name: "shell.overlay",
+        id: "modellix.credential-recovery",
+        order: 10,
+        locale: MODELLIX_LOCALE_NAMESPACE,
+        inject: () => ({ controller: settingsController }),
+      },
+      CredentialRecoveryOverlay,
+    ),
+  );
 
   ctx.slots.inject("settings.onboarding", () =>
     ctx.slots.register(

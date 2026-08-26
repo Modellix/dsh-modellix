@@ -24,15 +24,21 @@ export type DesignErrorCode =
 export class DesignError extends Error {
   readonly code: DesignErrorCode;
   readonly status: number | null;
+  readonly retryAfterMs: number | null;
 
   constructor(
     code: DesignErrorCode,
     message: string,
-    options: { readonly status?: number; readonly cause?: unknown } = {},
+    options: {
+      readonly status?: number;
+      readonly retryAfterMs?: number | null;
+      readonly cause?: unknown;
+    } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "DesignError";
     this.code = code;
     this.status = options.status ?? null;
+    this.retryAfterMs = options.retryAfterMs ?? null;
   }
 }

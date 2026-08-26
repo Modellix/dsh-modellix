@@ -54,6 +54,10 @@ describe("DesignHostController", () => {
       instruction: "Use high quality",
       draftRevision: draft.draftRevision,
       irContractHash: draft.irContractHash,
+      parameters: {
+        "/prompt": "A paper city",
+        "/quality": "standard",
+      },
     });
 
     expect(plannerPosts).toBe(1);
@@ -71,12 +75,27 @@ describe("DesignHostController", () => {
       conflicts: [],
     });
 
+    await expect(harness.controller.handle("design/proposal/apply", {
+      version: 1,
+      sessionId: "session-plan",
+      proposalId: proposed.proposal?.proposalId,
+      parameters: {
+        "/prompt": "A paper city edited after proposal",
+        "/quality": "standard",
+      },
+    })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+
     const applied = await harness.controller.handle("design/proposal/apply", {
       version: 1,
       sessionId: "session-plan",
       proposalId: proposed.proposal?.proposalId,
+      parameters: {
+        "/prompt": "A paper city",
+        "/quality": "standard",
+      },
     });
     expect(applied.draft?.parameters["/quality"]).toBe("high");
+    expect(applied.draft?.parameters["/prompt"]).toBe("A paper city");
     assertNoSecretOnWire(applied, harness.values);
   });
 
@@ -263,6 +282,136 @@ describe("DesignHostController", () => {
     assertNoSecretOnWire(recovered, restarted.values);
   });
 
+  it("retries only the local accepted-task commit after a successful paid POST", async () => {
+    let paidPosts = 0;
+    let acceptedWrites = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        paidPosts += 1;
+        return jsonResponse({ task_id: "task-local-retry", status: "queued" });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    }, {
+      onStorageWrite: (value) => {
+        const document = JSON.parse(value) as {
+          readonly events: readonly { readonly type: string }[];
+        };
+        if (document.events.at(-1)?.type === "submit-accepted" && acceptedWrites++ === 0) {
+          throw new Error("transient local commit failure");
+        }
+      },
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-local-retry");
+    const draft = requireDraft(selected);
+
+    const result = await harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-local-retry",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Persist this task once" },
+    });
+
+    expect(paidPosts).toBe(1);
+    expect(acceptedWrites).toBe(2);
+    expect(result.jobs).toEqual([
+      expect.objectContaining({ jobId: "task-local-retry", status: "running" }),
+    ]);
+  });
+
+  it("never marks a successful paid POST as rejected when its task core cannot be stored", async () => {
+    let paidPosts = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        paidPosts += 1;
+        return jsonResponse({ task_id: "task-storage-down", status: "queued" });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    }, {
+      onStorageWrite: (value) => {
+        const document = JSON.parse(value) as {
+          readonly events: readonly { readonly type: string }[];
+        };
+        if (document.events.at(-1)?.type === "submit-accepted") {
+          throw new Error("accepted task core cannot be stored");
+        }
+      },
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-storage-down");
+    const draft = requireDraft(selected);
+
+    await expect(harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-storage-down",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Do not report this as rejected" },
+    })).rejects.toThrow(/accepted task core cannot be stored/u);
+
+    const recovered = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-storage-down",
+    });
+    expect(paidPosts).toBe(1);
+    expect(recovered.jobs).toEqual([
+      expect.objectContaining({ status: "submit-unknown" }),
+    ]);
+  });
+
+  it("does not poll a running task with a different credential generation", async () => {
+    let credentialEpoch = 7;
+    let paidPosts = 0;
+    let taskReads = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        paidPosts += 1;
+        return jsonResponse({ task_id: "task-old-credential", status: "queued" });
+      }
+      if (url.endsWith("/tasks/task-old-credential")) {
+        taskReads += 1;
+        return new Response(null, { status: 401 });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    }, { credentialEpoch: () => credentialEpoch });
+    const selected = await selectDefaultModel(harness.controller, "session-old-credential");
+    const draft = requireDraft(selected);
+    await harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-old-credential",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Bound to credential generation seven" },
+    });
+
+    credentialEpoch = 8;
+    const snapshot = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-old-credential",
+    });
+
+    expect(paidPosts).toBe(1);
+    expect(taskReads).toBe(0);
+    expect(harness.onUnauthorized).not.toHaveBeenCalled();
+    expect(snapshot.jobs).toEqual([
+      expect.objectContaining({
+        status: "running",
+        diagnostic: expect.objectContaining({ code: "credential-changed" }),
+      }),
+    ]);
+  });
+
   it("polls queued tasks once, exposes only safe unexpired resources, then expires them", async () => {
     const completedAt = Date.parse("2026-08-25T01:00:00.000Z");
     const expiresAt = Date.parse("2026-08-25T02:00:00.000Z");
@@ -336,12 +485,304 @@ describe("DesignHostController", () => {
     ]);
     assertNoSecretOnWire(expired, harness.values);
   });
+
+  it("polls a task-id-only submit response instead of leaving an unknown task stuck", async () => {
+    let taskReads = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        return jsonResponse({ task_id: "task-status-unknown" });
+      }
+      if (url === "https://api.modellix.ai/api/v1/tasks/task-status-unknown") {
+        taskReads += 1;
+        return jsonResponse({
+          task_id: "task-status-unknown",
+          status: "completed",
+          resources: [{ type: "image", url: "https://cdn.example/unknown-finished.png" }],
+        });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-unknown-status");
+    const draft = requireDraft(selected);
+    await harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-unknown-status",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Finish after a status read" },
+    });
+
+    const completed = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-unknown-status",
+    });
+
+    expect(taskReads).toBe(1);
+    expect(completed.jobs[0]).toMatchObject({
+      jobId: "task-status-unknown",
+      status: "succeeded",
+    });
+  });
+
+  it("polls more than five active tasks fairly across bounded batches", async () => {
+    let nextTask = 0;
+    const taskReads: string[] = [];
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        nextTask += 1;
+        return jsonResponse({ task_id: `task-fair-${String(nextTask)}`, status: "queued" });
+      }
+      if (url.startsWith("https://api.modellix.ai/api/v1/tasks/task-fair-")) {
+        taskReads.push(url);
+        return jsonResponse({ task_id: url.split("/").at(-1), status: "running" });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    });
+    let snapshot = await selectDefaultModel(harness.controller, "session-fair");
+    for (let index = 0; index < 6; index += 1) {
+      const draft = requireDraft(snapshot);
+      snapshot = await harness.controller.handle("design/submit", {
+        version: 1,
+        sessionId: "session-fair",
+        modelId: MODEL_ID,
+        draftRevision: draft.draftRevision,
+        irContractHash: draft.irContractHash,
+        parameters: { "/prompt": `Fair task ${String(index + 1)}` },
+      });
+    }
+
+    await harness.controller.pollRunning();
+    expect(taskReads).toHaveLength(5);
+    await harness.controller.pollRunning();
+
+    expect(new Set(taskReads.map((url) => url.split("/").at(-1)))).toEqual(new Set([
+      "task-fair-1",
+      "task-fair-2",
+      "task-fair-3",
+      "task-fair-4",
+      "task-fair-5",
+      "task-fair-6",
+    ]));
+  });
+
+  it("persists an inaccessible-task diagnostic and never polls that task again", async () => {
+    let taskReads = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        return jsonResponse({ task_id: "task-gone", status: "queued" });
+      }
+      if (url.endsWith("/tasks/task-gone")) {
+        taskReads += 1;
+        return jsonResponse({ error: "not found" }, 404);
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-gone");
+    const draft = requireDraft(selected);
+    await harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-gone",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "A task that disappeared" },
+    });
+
+    const first = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-gone",
+    });
+    const second = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-gone",
+    });
+
+    expect(taskReads).toBe(1);
+    expect(first.jobs[0]?.diagnostic).toEqual({
+      code: "task-inaccessible",
+      message: "This generation task is no longer accessible.",
+      retryable: false,
+    });
+    expect(second.jobs[0]?.diagnostic).toEqual(first.jobs[0]?.diagnostic);
+  });
+
+  it("persists Retry-After and suppresses task reads until the deadline", async () => {
+    let now = 10_000;
+    let taskReads = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        return jsonResponse({ task_id: "task-rate-limited", status: "queued" });
+      }
+      if (url.endsWith("/tasks/task-rate-limited")) {
+        taskReads += 1;
+        if (taskReads === 1) {
+          return new Response(JSON.stringify({ error: "slow down" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "60" },
+          });
+        }
+        return jsonResponse({ task_id: "task-rate-limited", status: "running" });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    }, { now: () => now });
+    const selected = await selectDefaultModel(harness.controller, "session-rate-limited");
+    const draft = requireDraft(selected);
+    await harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-rate-limited",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Wait for the rate limit" },
+    });
+
+    const limited = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-rate-limited",
+    });
+    now += 59_999;
+    await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-rate-limited",
+    });
+    expect(taskReads).toBe(1);
+    expect(limited.jobs[0]?.diagnostic).toMatchObject({
+      code: "rate-limited",
+      retryable: true,
+    });
+
+    now += 1;
+    const resumed = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-rate-limited",
+    });
+    expect(taskReads).toBe(2);
+    expect(resumed.jobs[0]?.diagnostic).toBeNull();
+  });
+
+  it("re-reads the catalog and rejects the prior draft after a credential epoch change", async () => {
+    let epoch = 7;
+    let catalogReads = 0;
+    const harness = controllerHarness(async (input) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) {
+        catalogReads += 1;
+        return catalogResponse();
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }, { credentialEpoch: () => epoch });
+    const selected = await selectDefaultModel(harness.controller, "session-rotated");
+    const oldDraft = requireDraft(selected);
+    const readsWithFirstCredential = catalogReads;
+    epoch = 8;
+
+    const rotated = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-rotated",
+    });
+
+    expect(catalogReads).toBeGreaterThan(readsWithFirstCredential);
+    expect(requireDraft(rotated).draftRevision).toBeGreaterThan(oldDraft.draftRevision);
+    await expect(harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-rotated",
+      modelId: MODEL_ID,
+      draftRevision: oldDraft.draftRevision,
+      irContractHash: oldDraft.irContractHash,
+      parameters: { "/prompt": "A stale credential draft" },
+    })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+  });
+
+  it("fails closed before a paid POST when the selected model leaves the live catalog", async () => {
+    let catalogContainsModel = true;
+    let paidPosts = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) {
+        return catalogContainsModel ? catalogResponse() : emptyCatalogResponse();
+      }
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        paidPosts += 1;
+        return jsonResponse({ task_id: "must-not-submit", status: "queued" });
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-unavailable");
+    const draft = requireDraft(selected);
+    catalogContainsModel = false;
+    const refreshed = await harness.controller.handle("design/refresh", {
+      version: 1,
+      sessionId: "session-unavailable",
+    });
+    expect(refreshed.models.find((model) => model.id === MODEL_ID)?.available).toBe(false);
+
+    await expect(harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-unavailable",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Do not charge" },
+    })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(paidPosts).toBe(0);
+  });
+
+  it("rejects schemas that cannot fit the closed Client field budget", async () => {
+    const tooManyFields = Object.fromEntries(
+      Array.from({ length: 256 }, (_, index) => [`extra_${String(index)}`, { type: "string" }]),
+    );
+    const harness = controllerHarness(async (input) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema(tooManyFields));
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(selectDefaultModel(harness.controller, "session-field-budget")).rejects.toMatchObject({
+      code: "SCHEMA_INVALID",
+    });
+  });
+
+  it("derives featured membership only from the featured catalog query", async () => {
+    const harness = controllerHarness(async (input) => {
+      const url = new URL(String(input));
+      if (url.href === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.origin + url.pathname === CATALOG_URL) {
+        return url.searchParams.get("featured") === "true"
+          ? emptyCatalogResponse()
+          : catalogResponse();
+      }
+      throw new Error(`Unexpected fetch: ${url.href}`);
+    }, { lastModel: () => MODEL_ID });
+
+    const selected = await selectDefaultModel(harness.controller, "session-featured");
+
+    expect(selected.selectedModelId).toBe(MODEL_ID);
+    expect(selected.models.find((model) => model.id === MODEL_ID)?.featured).toBe(false);
+  });
 });
 
 interface HarnessOptions {
   readonly values?: Map<string, string>;
   readonly now?: () => number;
   readonly onStorageWrite?: (value: string) => void | Promise<void>;
+  readonly credentialEpoch?: () => number;
+  readonly lastModel?: () => string | null;
 }
 
 function controllerHarness(
@@ -350,8 +791,11 @@ function controllerHarness(
 ): {
   readonly controller: DesignHostController;
   readonly values: Map<string, string>;
+  readonly onUnauthorized: ReturnType<typeof vi.fn>;
 } {
   const values = options.values ?? new Map<string, string>();
+  const currentCredentialEpoch = options.credentialEpoch ?? (() => 7);
+  const onUnauthorized = vi.fn(async () => undefined);
   const storage: StoragePort = {
     read: async (key) => values.get(key) ?? null,
     write: async (key, value) => {
@@ -361,16 +805,17 @@ function controllerHarness(
   };
   return {
     values,
+    onUnauthorized,
     controller: new DesignHostController({
       storage,
       resolveCredential: async () => ({
         value: API_KEY_SENTINEL,
-        credentialEpoch: 7,
+        credentialEpoch: currentCredentialEpoch(),
       }),
-      isCredentialEpochCurrent: (epoch) => epoch === 7,
-      onUnauthorized: vi.fn(async () => undefined),
+      isCredentialEpochCurrent: (epoch) => epoch === currentCredentialEpoch(),
+      onUnauthorized,
       isEnabled: () => true,
-      getLastModel: () => null,
+      getLastModel: options.lastModel ?? (() => null),
       rememberModel: vi.fn(async () => undefined),
       fetch: fetchPort,
       ...(options.now === undefined ? {} : { now: options.now }),
@@ -450,6 +895,12 @@ function catalogResponse(): Response {
       page_size: 100,
       total: 1,
     },
+  });
+}
+
+function emptyCatalogResponse(): Response {
+  return jsonResponse({
+    data: { items: [], page: 1, page_size: 100, total: 0 },
   });
 }
 

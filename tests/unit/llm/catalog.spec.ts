@@ -76,6 +76,47 @@ describe("Modellix LLM catalog", () => {
     }
   });
 
+  it("bounds a chunked catalog response without Content-Length", async () => {
+    let canceled = false;
+    const client = new LlmCatalogClient({
+      resolveCredential: async () => ({ value: "private", credentialEpoch: 1 }),
+      maxResponseBytes: 100,
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(new Uint8Array(80));
+          stream.enqueue(new Uint8Array(80));
+        },
+        cancel() {
+          canceled = true;
+        },
+      })),
+    });
+
+    await expect(client.fetchModels()).rejects.toMatchObject({
+      contract: { code: "MODELLIX_UNEXPECTED_RESPONSE" },
+    });
+    expect(canceled).toBe(true);
+  });
+
+  it("cancels a stalled catalog body", async () => {
+    let canceled = false;
+    const controller = new AbortController();
+    const client = new LlmCatalogClient({
+      resolveCredential: async () => ({ value: "private", credentialEpoch: 1 }),
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        cancel() {
+          canceled = true;
+        },
+      })),
+    });
+    const loading = client.fetchModels(controller.signal);
+
+    controller.abort();
+
+    await expect(loading).rejects.toMatchObject({ name: "AbortError" });
+    expect(canceled).toBe(true);
+  });
+
   it("deduplicates repeated model IDs deterministically", async () => {
     const client = new LlmCatalogClient({
       resolveCredential: async () => ({ value: "private", credentialEpoch: 1 }),

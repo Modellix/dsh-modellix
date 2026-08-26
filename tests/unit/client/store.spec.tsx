@@ -163,6 +163,7 @@ describe("Modellix Client resource controllers", () => {
     expect(controller.store.getSnapshot()).toMatchObject({
       status: "error",
       errorCode: "settings-changed",
+      errorOperation: "save-toggles",
       data: { settingsRevision: 9 },
     });
   });
@@ -194,6 +195,7 @@ describe("Modellix Client resource controllers", () => {
       data: null,
       pending: null,
       errorCode: "MODELLIX_UNAUTHORIZED",
+      errorOperation: "replace-credential",
     });
     expect(JSON.stringify(controller.store.getSnapshot())).not.toContain("unsafe prose");
   });
@@ -240,6 +242,7 @@ describe("Modellix Client resource controllers", () => {
       data: null,
       pending: null,
       errorCode: null,
+      errorOperation: null,
     });
   });
 
@@ -284,5 +287,24 @@ describe("Modellix Client resource controllers", () => {
       pending: null,
       errorCode: null,
     });
+  });
+
+  it("refuses paid Design operations for an unavailable selected model", async () => {
+    const unavailable = design() as {
+      models: Array<{ available: boolean; unavailableReason: string | null }>;
+    };
+    unavailable.models[0]!.available = false;
+    unavailable.models[0]!.unavailableReason = "Removed from catalog";
+    const endpoints: string[] = [];
+    const rpc = rpcFrom(async (_channel, endpoint) => {
+      endpoints.push(endpoint);
+      return { ok: true, value: unavailable };
+    });
+    const controller = new DesignController(rpc, "session-1");
+    await controller.load();
+
+    await expect(controller.propose("Make it cinematic", {})).resolves.toBe(false);
+    await expect(controller.submit({ "/prompt": "A test" })).resolves.toBe(false);
+    expect(endpoints).toEqual(["design/read"]);
   });
 });

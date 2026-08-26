@@ -14,6 +14,14 @@ export interface ModelCatalogQuery {
   readonly category: DesignMediaCategory;
   readonly page?: number;
   readonly pageSize?: number;
+  readonly featured?: boolean;
+}
+
+interface NormalizedModelCatalogQuery {
+  readonly category: DesignMediaCategory;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly featured: boolean;
 }
 
 export interface DesignModelSummary {
@@ -77,7 +85,7 @@ export class ModelCatalogClient {
 
   async list(query: ModelCatalogQuery, signal?: AbortSignal): Promise<ModelCatalogPage> {
     const normalized = normalizeQuery(query);
-    const cacheKey = `design:catalog:v1:${normalized.category}:${normalized.page}:${normalized.pageSize}`;
+    const cacheKey = `design:catalog:v1:${normalized.category}:${normalized.page}:${normalized.pageSize}:${normalized.featured ? "featured" : "all"}`;
     const cached = await this.#cache?.read<ModelCatalogPage>(cacheKey);
     if (cached !== undefined && cached !== null && cached.expiresAt > this.#clock.now()) {
       return cached.value;
@@ -130,7 +138,7 @@ export class ModelCatalogClient {
 
   async #requestCatalog(
     baseUrl: string,
-    query: Required<ModelCatalogQuery>,
+    query: NormalizedModelCatalogQuery,
     apiKey: string | null,
     source: ModelCatalogPage["source"],
     signal?: AbortSignal,
@@ -139,6 +147,7 @@ export class ModelCatalogClient {
     url.searchParams.set("category", query.category);
     url.searchParams.set("page", String(query.page));
     url.searchParams.set("page_size", String(query.pageSize));
+    if (query.featured) url.searchParams.set("featured", "true");
     const headers = new Headers({ accept: "application/json" });
     if (apiKey !== null) {
       headers.set("authorization", `Bearer ${apiKey}`);
@@ -183,7 +192,7 @@ export class ModelCatalogClient {
 
 export function parseCatalogPage(
   payload: unknown,
-  query: Required<ModelCatalogQuery>,
+  query: Required<Pick<ModelCatalogQuery, "category" | "page" | "pageSize">>,
   source: ModelCatalogPage["source"],
 ): ModelCatalogPage {
   const envelope = record(payload);
@@ -315,7 +324,7 @@ function mediaCategory(value: unknown): DesignMediaCategory | null {
   }
 }
 
-function normalizeQuery(query: ModelCatalogQuery): Required<ModelCatalogQuery> {
+function normalizeQuery(query: ModelCatalogQuery): NormalizedModelCatalogQuery {
   if (query.category !== "image" && query.category !== "video" && query.category !== "audio") {
     throw new DesignError("INVALID_ARGUMENT", "category must be image, video, or audio");
   }
@@ -327,6 +336,7 @@ function normalizeQuery(query: ModelCatalogQuery): Required<ModelCatalogQuery> {
       MAX_PAGE_SIZE,
       "pageSize",
     ),
+    featured: query.featured === true,
   };
 }
 

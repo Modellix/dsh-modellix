@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -20,6 +20,8 @@ export interface DialogA11yOptions {
 /** Adds the focus behavior intentionally absent from the public Modal primitive. */
 export function useDialogA11y(options: DialogA11yOptions): void {
   const { open, container, initialFocusSelector, mandatory, onEscape } = options;
+  const onEscapeRef = useRef(onEscape);
+  onEscapeRef.current = onEscape;
 
   useEffect(() => {
     if (!open || typeof document === "undefined") return;
@@ -45,7 +47,7 @@ export function useDialogA11y(options: DialogA11yOptions): void {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (!mandatory) onEscape();
+        if (!mandatory) onEscapeRef.current();
         return;
       }
       if (event.key !== "Tab") return;
@@ -75,7 +77,7 @@ export function useDialogA11y(options: DialogA11yOptions): void {
       if (appRoot !== null) appRoot.inert = previousInert;
       if (previouslyFocused?.isConnected === true) previouslyFocused.focus();
     };
-  }, [container, initialFocusSelector, mandatory, onEscape, open]);
+  }, [container, initialFocusSelector, mandatory, open]);
 }
 
 export function clearSecretInput(container: HTMLElement | null): void {

@@ -146,7 +146,7 @@ export function createModellixDesignToolDefinitions(
 }
 
 /**
- * Register Design tools plus the paid-generate approval gate. The returned
+ * Register Design tools plus explicit LLM-proposal and paid-generate approval gates. The returned
  * disposer removes both definitions and the gate, allowing the runtime to
  * mirror the live Design toggle without leaving model-visible stale tools.
  */
@@ -157,12 +157,17 @@ export function registerModellixDesignTools(
   const disposers: (() => unknown)[] = [];
   try {
     disposers.push(ctx.on("tools/pre-execute", async (exec, next): Promise<PreToolDecision> => {
-      if (exec.name !== MODELLIX_DESIGN_GENERATE_TOOL) return next();
+      if (
+        exec.name !== MODELLIX_DESIGN_PREPARE_TOOL &&
+        exec.name !== MODELLIX_DESIGN_GENERATE_TOOL
+      ) return next();
       const downstream = await next();
       if (downstream.kind !== "allow") return downstream;
       return {
         kind: "ask",
-        reason: "This submits one paid Modellix Design generation request. Review the arguments and allow it once to confirm.",
+        reason: exec.name === MODELLIX_DESIGN_PREPARE_TOOL
+          ? "This sends one Modellix LLM request to prepare a parameter proposal and may consume balance. Review the instruction and allow it once to continue. It will not generate media."
+          : "This submits one paid Modellix Design generation request. Review the arguments and allow it once to confirm.",
       };
     }));
     for (const definition of createModellixDesignToolDefinitions(controller)) {
@@ -278,7 +283,7 @@ function createModelsTool(controller: DesignToolController): ToolDefinition {
 function createPrepareTool(controller: DesignToolController): ToolDefinition {
   return defineTool({
     name: MODELLIX_DESIGN_PREPARE_TOOL,
-    description: "Prepare a schema-constrained Modellix Design parameter proposal for one provider/model slug. This never submits a generation. The returned diff still requires explicit acceptance or a separately approved generate call.",
+    description: "Use one Modellix LLM request to prepare a schema-constrained Design parameter proposal for one provider/model slug. This may consume balance but never submits a media generation. The returned diff still requires explicit acceptance or a separately approved generate call.",
     parameters: {
       model: { type: "string", required: true, description: "Exact provider/model slug from modellix_design_models." },
       instruction: { type: "string", required: true, description: "Prompt or conservative parameter instruction. Plain text updates only the schema-declared primary input; other fields require explicit assignments." },
@@ -344,6 +349,7 @@ function createPrepareTool(controller: DesignToolController): ToolDefinition {
         instruction,
         draftRevision: draft.draftRevision,
         irContractHash: draft.irContractHash,
+        parameters: draft.parameters,
       }, exec.signal);
       throwIfAborted(exec.signal);
       const proposal = proposed.proposal;

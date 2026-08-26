@@ -308,7 +308,7 @@ describe("Modellix Design tools", () => {
     expect(result.job?.resources).toEqual([{ kind: "image", url: "https://cdn.example.test/result.png", expiresAt: "2026-09-01T00:00:00.000Z" }]);
   });
 
-  it("registers a one-shot approval gate only for the paid generate tool", async () => {
+  it("registers distinct one-shot approval gates for LLM prepare and paid generate", async () => {
     const definitions: ToolDefinition[] = [];
     let listener: ((
       exec: ToolExecution,
@@ -342,7 +342,18 @@ describe("Modellix Design tools", () => {
       { name: MODELLIX_DESIGN_MODELS_TOOL } as ToolExecution,
       () => Promise.resolve({ kind: "allow" }),
     );
-    expect(approved).toMatchObject({ kind: "ask" });
+    const prepared = await listener(
+      { name: MODELLIX_DESIGN_PREPARE_TOOL } as ToolExecution,
+      () => Promise.resolve({ kind: "allow" }),
+    );
+    expect(approved).toMatchObject({
+      kind: "ask",
+      reason: expect.stringContaining("paid Modellix Design generation"),
+    });
+    expect(prepared).toMatchObject({
+      kind: "ask",
+      reason: expect.stringContaining("Modellix LLM request"),
+    });
     expect(readOnly).toEqual({ kind: "allow" });
 
     dispose();

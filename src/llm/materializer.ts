@@ -86,6 +86,9 @@ export function planLlmRouteMaterialization(
   const previousOwned = new Map(previous.entries
     .filter((entry) => entry.kind === "model")
     .map((entry) => [entry.key, entry.appliedFingerprint]));
+  const previousOwnedFields = new Map(previous.entries
+    .filter((entry) => entry.kind === "field")
+    .map((entry) => [entry.key, entry.appliedFingerprint]));
   const existingModels = existing?.models === undefined
     ? []
     : requireModelArray(existing.models);
@@ -120,14 +123,24 @@ export function planLlmRouteMaterialization(
 
   const oldModelMap = new Map(existingModels.map((model) => [model.id, model]));
   const ownedEntries: LlmOwnedEntry[] = [
-    ...Object.entries(WIRE_FIELDS).map(([key, value]) => ({
-      kind: "field" as const,
-      key: `/${key}`,
-      appliedFingerprint: fingerprint(value),
-    })),
+    ...Object.entries(WIRE_FIELDS).flatMap(([key, value]) => {
+      const path = `/${key}`;
+      const before = existing?.[key];
+      const priorFingerprint = previousOwnedFields.get(path);
+      return before === undefined ||
+        (priorFingerprint !== undefined && fingerprint(before) === priorFingerprint)
+        ? [{
+            kind: "field" as const,
+            key: path,
+            appliedFingerprint: fingerprint(value),
+          }]
+        : [];
+    }),
     ...models.filter((model) => {
       const before = oldModelMap.get(model.id);
-      return before === undefined || previousOwned.has(model.id);
+      const priorFingerprint = previousOwned.get(model.id);
+      return before === undefined ||
+        (priorFingerprint !== undefined && fingerprint(before) === priorFingerprint);
     }).map((model) => ({
       kind: "model" as const,
       key: model.id,
@@ -135,10 +148,13 @@ export function planLlmRouteMaterialization(
     })),
   ];
   const nextFingerprint = fingerprint(route);
+  const previousCreatedRouteIsUntouched = previous.ownership === "created" &&
+    previous.appliedRouteFingerprint !== null && existing !== undefined &&
+    fingerprint(existing) === previous.appliedRouteFingerprint;
   return {
     route,
     ledger: {
-      ownership: existing === undefined ? "created" : "adopted",
+      ownership: existing === undefined || previousCreatedRouteIsUntouched ? "created" : "adopted",
       appliedRouteFingerprint: nextFingerprint,
       entries: ownedEntries,
     },
@@ -192,6 +208,30 @@ export function planLlmRouteRemoval(
   };
 }
 
+/**
+ * Preserve only ownership already proven before an interrupted cross-namespace
+ * commit. Newly materialized values are deliberately left unowned because the
+ * public Settings API cannot prove which process wrote the observed revision.
+ */
+export function reconcileLlmRouteLedgerAfterInterruption(
+  current: unknown,
+  ledger: LlmRouteLedger,
+): LlmRouteLedger {
+  if (ledger.ownership === "none" || current === undefined || ledger.appliedRouteFingerprint === null) {
+    return EMPTY_LLM_ROUTE_LEDGER;
+  }
+  const route = requireRecord(current, "route");
+  if (ledger.ownership === "created" && fingerprint(route) === ledger.appliedRouteFingerprint) {
+    return cloneLedger(ledger);
+  }
+  return {
+    ownership: "adopted",
+    appliedRouteFingerprint: ledger.appliedRouteFingerprint,
+    entries: ledger.entries.filter((entry) => ownedEntryMatches(route, entry))
+      .map((entry) => ({ ...entry })),
+  };
+}
+
 export interface SettingsNamespaceDescriptor {
   readonly revision: number;
   readonly value: unknown;
@@ -214,6 +254,27 @@ export interface LlmSettingsPort {
   ): Promise<void>;
 }
 
+export interface LlmMaterializationReceipt {
+  readonly ledger: LlmRouteLedger;
+  /** Restore the raw Modellix route captured immediately before this write. */
+  rollback(): Promise<void>;
+}
+
+export interface LlmPreparedMaterialization extends LlmMaterializationReceipt {
+  readonly changed: boolean;
+  readonly expectedSettingsRevision: number;
+  apply(): Promise<void>;
+}
+
+export class LlmMaterializationRollbackError extends Error {
+  constructor(reason: "namespace-unavailable" | "route-changed") {
+    super(reason === "namespace-unavailable"
+      ? "Cannot restore the previous LLM settings snapshot because the namespace is unavailable"
+      : "Cannot restore the previous LLM settings snapshot because the route changed");
+    this.name = "LlmMaterializationRollbackError";
+  }
+}
+
 /** CAS materializer over the public Settings namespace contract. */
 export class LlmSettingsMaterializer {
   readonly #settings: LlmSettingsPort;
@@ -226,6 +287,22 @@ export class LlmSettingsMaterializer {
     catalog: readonly ModellixLlmModel[],
     ledger: LlmRouteLedger,
   ): Promise<LlmRouteLedger> {
+    return (await this.materializeWithRollback(catalog, ledger)).ledger;
+  }
+
+  async materializeWithRollback(
+    catalog: readonly ModellixLlmModel[],
+    ledger: LlmRouteLedger,
+  ): Promise<LlmMaterializationReceipt> {
+    const prepared = await this.prepareMaterialization(catalog, ledger);
+    await prepared.apply();
+    return prepared;
+  }
+
+  async prepareMaterialization(
+    catalog: readonly ModellixLlmModel[],
+    ledger: LlmRouteLedger,
+  ): Promise<LlmPreparedMaterialization> {
     const descriptor = await this.#describeReady();
     if (descriptor === undefined) throw new Error("llm-pi-ai settings namespace is unavailable");
     const base = descriptor.base === undefined ? {} : requireRecord(descriptor.base, "settings base section");
@@ -242,17 +319,79 @@ export class LlmSettingsMaterializer {
     // conflict after every Host restart.
     const current = userProviders[MODELLIX_LLM_PROVIDER_ID];
     const plan = planLlmRouteMaterialization(current, catalog, ledger);
-    const nextLedger = ledger.ownership === "created"
-      ? { ...plan.ledger, ownership: "created" as const }
-      : plan.ledger;
-    if (plan.changed) {
-      await this.#settings.mutate([{
-        op: "set",
-        path: ["providers", MODELLIX_LLM_PROVIDER_ID],
-        value: plan.route,
-      }], descriptor.revision);
+    const previousRoute = current === undefined
+      ? undefined
+      : structuredClone(requireRecord(current, "route"));
+    const previousFingerprint = fingerprint(previousRoute);
+    const appliedFingerprint = fingerprint(plan.route);
+    let applyAttempted = false;
+    let applied = false;
+    let rolledBack = false;
+    return {
+      ledger: plan.ledger,
+      changed: plan.changed,
+      expectedSettingsRevision: descriptor.revision,
+      apply: async () => {
+        if (!plan.changed || applied) return;
+        applyAttempted = true;
+        await this.#settings.mutate([{
+          op: "set",
+          path: ["providers", MODELLIX_LLM_PROVIDER_ID],
+          value: plan.route,
+        }], descriptor.revision);
+        applied = true;
+      },
+      rollback: async () => {
+        if (!plan.changed || !applyAttempted || rolledBack) return;
+        const rollbackDescriptor = await this.#describeReady();
+        if (rollbackDescriptor === undefined) {
+          throw new LlmMaterializationRollbackError("namespace-unavailable");
+        }
+        const rollbackUser = rollbackDescriptor.user === undefined
+          ? {}
+          : requireRecord(rollbackDescriptor.user, "settings user section");
+        const rollbackProviders = rollbackUser.providers === undefined
+          ? {}
+          : requireRecord(rollbackUser.providers, "user providers");
+        const currentRoute = rollbackProviders[MODELLIX_LLM_PROVIDER_ID];
+        const currentFingerprint = fingerprint(currentRoute);
+        if (currentFingerprint === previousFingerprint) {
+          rolledBack = true;
+          return;
+        }
+        if (currentFingerprint !== appliedFingerprint) {
+          throw new LlmMaterializationRollbackError("route-changed");
+        }
+        await this.#settings.mutate(previousRoute === undefined
+          ? [{
+              op: "unset",
+              path: ["providers", MODELLIX_LLM_PROVIDER_ID],
+            }]
+          : [{
+              op: "set",
+              path: ["providers", MODELLIX_LLM_PROVIDER_ID],
+              value: structuredClone(previousRoute),
+            }], rollbackDescriptor.revision);
+        rolledBack = true;
+      },
+    };
+  }
+
+  async recoverInterruptedMaterialization(
+    ledger: LlmRouteLedger,
+    expectedSettingsRevision: number,
+  ): Promise<LlmRouteLedger> {
+    const descriptor = await this.#describeReady();
+    if (descriptor === undefined) throw new Error("llm-pi-ai settings namespace is unavailable");
+    if (descriptor.revision < expectedSettingsRevision) {
+      throw new Error("llm-pi-ai settings revision regressed during materialization recovery");
     }
-    return nextLedger;
+    const user = descriptor.user === undefined ? {} : requireRecord(descriptor.user, "settings user section");
+    const providers = user.providers === undefined ? {} : requireRecord(user.providers, "user providers");
+    return reconcileLlmRouteLedgerAfterInterruption(
+      providers[MODELLIX_LLM_PROVIDER_ID],
+      ledger,
+    );
   }
 
   async remove(ledger: LlmRouteLedger): Promise<LlmRouteLedger> {
@@ -299,6 +438,25 @@ function assertCompatible(route: Record<string, unknown>): void {
 
 function mergeOwnedModel(before: PiAiModelEntry, next: ModellixLlmModel): PiAiModelEntry {
   return next.name === undefined ? { ...before, id: next.id } : { ...before, id: next.id, name: next.name };
+}
+
+function ownedEntryMatches(route: Record<string, unknown>, entry: LlmOwnedEntry): boolean {
+  if (entry.kind === "field") {
+    const field = entry.key.startsWith("/") ? entry.key.slice(1) : "";
+    return field.length > 0 && !field.includes("/") &&
+      fingerprint(route[field]) === entry.appliedFingerprint;
+  }
+  if (!Array.isArray(route.models)) return false;
+  const model = route.models.find((value) => isRecord(value) && value.id === entry.key);
+  return model !== undefined && fingerprint(model) === entry.appliedFingerprint;
+}
+
+function cloneLedger(ledger: LlmRouteLedger): LlmRouteLedger {
+  return {
+    ownership: ledger.ownership,
+    appliedRouteFingerprint: ledger.appliedRouteFingerprint,
+    entries: ledger.entries.map((entry) => ({ ...entry })),
+  };
 }
 
 function assertCatalog(catalog: readonly ModellixLlmModel[]): void {

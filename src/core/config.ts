@@ -3,7 +3,7 @@ export const MODELLIX_CREDENTIAL_REF = "MODELLIX_API_KEY" as const;
 
 export type ServiceId = "design" | "llm" | "web";
 export type OnboardingStatus = "active" | "completed" | "deferred";
-export type RetentionPolicy = "retain-input" | "metadata-only";
+export type RetentionPolicy = "metadata-only";
 
 export interface ServiceToggles {
   readonly design: boolean;
@@ -77,8 +77,16 @@ export interface LlmRouteOwnershipConfig {
   readonly entries: readonly LlmRouteOwnershipEntry[];
 }
 
+/** Non-secret write-ahead marker for one cross-namespace LLM materialization. */
+export interface LlmMaterializationRecovery {
+  readonly operationId: string;
+  readonly startedAt: number;
+  readonly expectedLlmSettingsRevision: number;
+}
+
 export interface LlmOwnershipConfig {
   readonly route: LlmRouteOwnershipConfig;
+  readonly materializationRecovery: LlmMaterializationRecovery | null;
 }
 
 export interface PluginConfig {
@@ -126,6 +134,13 @@ export class OnboardingSaveConflictError extends Error {
   }
 }
 
+export class LlmMaterializationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LlmMaterializationConflictError";
+  }
+}
+
 const DEFAULT_TOGGLES: ServiceToggles = Object.freeze({
   design: true,
   llm: true,
@@ -163,6 +178,7 @@ export function createDefaultConfig(): PluginConfig {
         appliedRouteFingerprint: null,
         entries: [],
       },
+      materializationRecovery: null,
     },
   };
 }
@@ -201,10 +217,7 @@ export function migrateConfig(input: unknown): PluginConfig {
     services: {
       design: {
         enabled: explicitBoolean(design.enabled, defaults.services.design.enabled),
-        retentionPolicy: retentionPolicy(
-          design.retentionPolicy,
-          defaults.services.design.retentionPolicy,
-        ),
+        retentionPolicy: retentionPolicy(design.retentionPolicy),
         retentionPolicyRevision: positiveInteger(
           design.retentionPolicyRevision,
           defaults.services.design.retentionPolicyRevision,
@@ -234,6 +247,9 @@ export function migrateConfig(input: unknown): PluginConfig {
     },
     llmOwnership: {
       route: migrateLlmRouteOwnership(llmOwnership.route),
+      materializationRecovery: migrateLlmMaterializationRecovery(
+        llmOwnership.materializationRecovery,
+      ),
     },
   };
 
@@ -255,6 +271,64 @@ export function setServiceToggles(
   return {
     ...config,
     services: applyToggles(config.services, toggles),
+  };
+}
+
+export function beginLlmMaterialization(
+  config: PluginConfig,
+  input: LlmMaterializationRecovery,
+): PluginConfig {
+  if (config.llmOwnership.materializationRecovery !== null) {
+    throw new LlmMaterializationConflictError(
+      "An LLM materialization operation is already pending",
+    );
+  }
+  assertOperationId(input.operationId);
+  assertTimestamp(input.startedAt);
+  if (!Number.isSafeInteger(input.expectedLlmSettingsRevision) || input.expectedLlmSettingsRevision < 0) {
+    throw new TypeError("expectedLlmSettingsRevision must be a non-negative safe integer");
+  }
+  return {
+    ...config,
+    llmOwnership: {
+      ...config.llmOwnership,
+      materializationRecovery: { ...input },
+    },
+  };
+}
+
+export function completeLlmMaterialization(
+  config: PluginConfig,
+  operationId: string,
+  route: LlmRouteOwnershipConfig,
+): PluginConfig {
+  requireLlmMaterializationRecovery(config, operationId);
+  return {
+    ...config,
+    llmOwnership: {
+      route: {
+        ownership: route.ownership,
+        appliedRouteFingerprint: route.appliedRouteFingerprint,
+        entries: route.entries.map((entry) => ({ ...entry })),
+      },
+      materializationRecovery: null,
+    },
+  };
+}
+
+export function abandonLlmMaterialization(
+  config: PluginConfig,
+  operationId: string,
+): PluginConfig {
+  const recovery = config.llmOwnership.materializationRecovery;
+  if (recovery === null) return config;
+  requireLlmMaterializationRecovery(config, operationId);
+  return {
+    ...config,
+    llmOwnership: {
+      ...config.llmOwnership,
+      materializationRecovery: null,
+    },
   };
 }
 
@@ -535,12 +609,12 @@ function explicitBoolean(value: unknown, fallback: boolean): boolean {
 }
 
 function retentionPolicy(
-  value: unknown,
-  fallback: RetentionPolicy,
+  _value: unknown,
 ): RetentionPolicy {
-  return value === "retain-input" || value === "metadata-only"
-    ? value
-    : fallback;
+  // Older development builds exposed retain-input even though the task WAL
+  // has always persisted metadata only. Accept any persisted legacy value at
+  // the migration boundary, but never expose or re-persist it as active state.
+  return "metadata-only";
 }
 
 function migrateLlmRouteOwnership(input: unknown): LlmRouteOwnershipConfig {
@@ -566,6 +640,31 @@ function migrateLlmRouteOwnership(input: unknown): LlmRouteOwnershipConfig {
   return ownership === "none" || appliedRouteFingerprint === null
     ? empty
     : { ownership, appliedRouteFingerprint, entries };
+}
+
+function migrateLlmMaterializationRecovery(input: unknown): LlmMaterializationRecovery | null {
+  if (!isRecord(input)) return null;
+  const operationId = safeOperationId(input.operationId);
+  const startedAt = optionalTimestamp(input.startedAt);
+  const expectedLlmSettingsRevision = optionalNonNegativeInteger(
+    input.expectedLlmSettingsRevision,
+  );
+  return operationId === null || startedAt === null || expectedLlmSettingsRevision === null
+    ? null
+    : { operationId, startedAt, expectedLlmSettingsRevision };
+}
+
+function requireLlmMaterializationRecovery(
+  config: PluginConfig,
+  operationId: string,
+): LlmMaterializationRecovery {
+  const recovery = config.llmOwnership.materializationRecovery;
+  if (recovery === null || recovery.operationId !== operationId) {
+    throw new LlmMaterializationConflictError(
+      "LLM materialization operation does not match the pending operation",
+    );
+  }
+  return recovery;
 }
 
 function modelIdList(value: unknown): string[] {

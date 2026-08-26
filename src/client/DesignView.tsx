@@ -28,6 +28,14 @@ import type {
   DesignSnapshotWire,
 } from "./contracts.js";
 import {
+  canGenerateDesign,
+  designOutcomeTransition,
+  isDesignFieldValueValid,
+  isMissingDesignParameter,
+  selectedDesignModel,
+  type DesignOutcomeTransition,
+} from "./design-state.js";
+import {
   BusyStatus,
   CredentialModal,
   ErrorNotice,
@@ -63,7 +71,11 @@ export function ModellixDesignView({
     () => new Set(),
   );
   const [credentialOpen, setCredentialOpen] = useState(false);
+  const [outcomeAnnouncement, setOutcomeAnnouncement] = useState("");
   const gatePresented = useRef(false);
+  const previousOutcome = useRef<
+    Pick<DesignSnapshotWire, "proposal" | "jobs"> | null
+  >(null);
   const visibleModels = useMemo(() => {
     const query = modelQuery.trim().toLocaleLowerCase();
     const models = snapshot?.models ?? [];
@@ -131,6 +143,21 @@ export function ModellixDesignView({
     };
   }, [controller, snapshot]);
 
+  useEffect(() => {
+    if (state.pending !== null) setOutcomeAnnouncement("");
+  }, [state.pending]);
+
+  useEffect(() => {
+    if (snapshot === null) return;
+    const transition = designOutcomeTransition(previousOutcome.current, snapshot);
+    previousOutcome.current = {
+      proposal: snapshot.proposal,
+      jobs: snapshot.jobs,
+    };
+    const announcement = designOutcomeText(transition, t);
+    if (announcement !== null) setOutcomeAnnouncement(announcement);
+  }, [snapshot?.jobs, snapshot?.proposal, t]);
+
   const updateParameter = useCallback(
     (path: string, value: ClientJsonValue | undefined): void => {
       setParameters((current) => {
@@ -174,17 +201,18 @@ export function ModellixDesignView({
       : "";
   const missingRequired =
     draft?.fields.some(
-      (field) => field.required && isMissingParameter(parameters, field.path),
+      (field) => field.required && isMissingDesignParameter(parameters, field.path),
     ) ?? true;
   const submitting = state.pending === "submit";
   const interactionBusy = state.pending !== null;
-  const canGenerate =
-    snapshot.enabled &&
-    snapshot.credentialReady &&
-    draft !== null &&
-    invalidFields.size === 0 &&
-    !missingRequired &&
-    !interactionBusy;
+  const selectedModel = selectedDesignModel(snapshot);
+  const canGenerate = canGenerateDesign({
+    snapshot,
+    draft,
+    invalidFieldCount: invalidFields.size,
+    missingRequired,
+    interactionBusy,
+  });
   const supplementalFields = draft?.fields.filter(
     (field) => field.path !== draft.primaryInputPath,
   ) ?? [];
@@ -266,6 +294,9 @@ export function ModellixDesignView({
               id="mdlx-design-model"
               className="mdlx-select"
               value={snapshot.selectedModelId ?? ""}
+              aria-describedby={
+                selectedModel?.available === false ? "mdlx-design-model-status" : undefined
+              }
               disabled={interactionBusy || !snapshot.enabled || snapshot.models.length === 0}
               onChange={(event) => {
                 const modelId = event.currentTarget.value;
@@ -275,7 +306,10 @@ export function ModellixDesignView({
               <option value="" disabled>{t("chooseModel")}</option>
               {snapshot.selectedModelId !== null &&
                 !visibleModels.some((model) => model.id === snapshot.selectedModelId) && (
-                  <option value={snapshot.selectedModelId}>
+                  <option
+                    value={snapshot.selectedModelId}
+                    disabled={selectedModel?.available === false}
+                  >
                     {snapshot.models.find((model) => model.id === snapshot.selectedModelId)?.label ??
                       snapshot.selectedModelId}
                   </option>
@@ -286,6 +320,11 @@ export function ModellixDesignView({
                 </option>
               ))}
             </select>
+            {selectedModel?.available === false && (
+              <span id="mdlx-design-model-status" className="mdlx-error" role="status">
+                {selectedModel.unavailableReason ?? t("modelUnavailable")}
+              </span>
+            )}
             {snapshot.models.length === 0 ? (
               <span className="mdlx-help">{t("noModels")}</span>
             ) : visibleModels.length === 0 && (
@@ -321,6 +360,7 @@ export function ModellixDesignView({
                       key={field.path}
                       field={field}
                       value={parameters[field.path]}
+                      invalid={invalidFields.has(field.path)}
                       disabled={interactionBusy}
                       onChange={(value) => updateParameter(field.path, value)}
                       onValidityChange={(valid) => setFieldValidity(field.path, valid)}
@@ -336,6 +376,7 @@ export function ModellixDesignView({
                           key={field.path}
                           field={field}
                           value={parameters[field.path]}
+                          invalid={invalidFields.has(field.path)}
                           disabled={interactionBusy}
                           onChange={(value) => updateParameter(field.path, value)}
                           onValidityChange={(valid) => setFieldValidity(field.path, valid)}
@@ -353,13 +394,18 @@ export function ModellixDesignView({
             <section className="mdlx-card" aria-labelledby="mdlx-assistant-title">
               <div className="mdlx-heading">
                 <h3 id="mdlx-assistant-title">{t("assistantTitle")}</h3>
-                <p className="mdlx-help">{t("assistantPaidNotice")}</p>
+                <p id="mdlx-assistant-paid-notice" className="mdlx-help">
+                  {t("assistantPaidNotice")}
+                </p>
               </div>
               <textarea
+                id="mdlx-assistant-instruction"
                 className="mdlx-textarea mdlx-textarea-small"
                 value={instruction}
                 maxLength={8_000}
                 placeholder={t("assistantPlaceholder")}
+                aria-labelledby="mdlx-assistant-title"
+                aria-describedby="mdlx-assistant-paid-notice"
                 disabled={interactionBusy}
                 onChange={(event) => setInstruction(event.currentTarget.value)}
               />
@@ -372,7 +418,7 @@ export function ModellixDesignView({
                   onClick={() => {
                     const request = instruction.trim();
                     if (request === "") return;
-                    void controller.propose(request).then((accepted) => {
+                    void controller.propose(request, parameters).then((accepted) => {
                       if (accepted) setInstruction("");
                     });
                   }}
@@ -384,14 +430,22 @@ export function ModellixDesignView({
           )}
 
           {snapshot.proposal !== null && (
-            <ProposalCard snapshot={snapshot} controller={controller} t={t} />
+            <ProposalCard
+              snapshot={snapshot}
+              parameters={parameters}
+              controller={controller}
+              t={t}
+            />
           )}
 
           {draft !== null && (
             <div className="mdlx-generate-block">
               <p className="mdlx-help">{t("paidNotice")}</p>
-              {(missingRequired || invalidFields.size > 0) && (
+              {missingRequired && (
                 <p className="mdlx-error">{t("requiredMissing")}</p>
+              )}
+              {invalidFields.size > 0 && (
+                <p className="mdlx-error">{t("parametersInvalid")}</p>
               )}
               <div className="mdlx-actions">
                 <Button
@@ -412,6 +466,9 @@ export function ModellixDesignView({
             busy={interactionBusy}
             text={operationText(state.pending, t)}
           />
+          <div className="mdlx-live" role="status" aria-live="polite">
+            {outcomeAnnouncement}
+          </div>
         </section>
 
         <DesignResults snapshot={snapshot} t={t} />
@@ -424,7 +481,11 @@ export function ModellixDesignView({
           title={t("onboardingTitle")}
           description={t("onboardingDescription")}
           busy={settingsState.pending === "replace-credential"}
-          errorCode={settingsState.errorCode}
+          errorCode={
+            settingsState.errorOperation === "replace-credential"
+              ? settingsState.errorCode
+              : null
+          }
           onSave={(apiKey) =>
             settingsController.replaceCredential(
               apiKey,
@@ -448,6 +509,7 @@ export function ModellixDesignView({
 function DesignParameterField({
   field,
   value,
+  invalid,
   disabled,
   onChange,
   onValidityChange,
@@ -455,6 +517,7 @@ function DesignParameterField({
 }: {
   field: DesignFieldWire;
   value: ClientJsonValue | undefined;
+  invalid: boolean;
   disabled: boolean;
   onChange: (value: ClientJsonValue | undefined) => void;
   onValidityChange: (valid: boolean) => void;
@@ -462,7 +525,15 @@ function DesignParameterField({
 }): ReactNode {
   const id = useId();
   const helpId = `${id}-help`;
+  const errorId = `${id}-error`;
   const locked = disabled || field.disabledReason !== null;
+  const jsonControl =
+    field.widget === "json" || field.kind === "array" || field.kind === "object";
+  const describedBy = `${helpId}${invalid && !jsonControl ? ` ${errorId}` : ""}`;
+  const commit = (next: ClientJsonValue | undefined): void => {
+    onValidityChange(isDesignFieldValueValid(field, next));
+    onChange(next);
+  };
   const label = (
     <label className="mdlx-label" htmlFor={id}>
       {field.label}
@@ -480,10 +551,15 @@ function DesignParameterField({
         className="mdlx-select"
         value={selected < 0 ? "" : String(selected)}
         disabled={locked}
-        aria-describedby={helpId}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
         onChange={(event) => {
-          const index = Number(event.currentTarget.value);
-          onChange(field.options[index]?.value);
+          const selectedIndex = event.currentTarget.value;
+          commit(
+            selectedIndex === ""
+              ? undefined
+              : field.options[Number(selectedIndex)]?.value,
+          );
         }}
       >
         <option value="">—</option>
@@ -503,8 +579,9 @@ function DesignParameterField({
         role="switch"
         checked={value === true}
         disabled={locked}
-        aria-describedby={helpId}
-        onChange={(event) => onChange(event.currentTarget.checked)}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
+        onChange={(event) => commit(event.currentTarget.checked)}
       />
     );
   } else if (field.kind === "number" || field.kind === "integer") {
@@ -518,13 +595,14 @@ function DesignParameterField({
         max={field.maximum ?? undefined}
         step={field.step ?? (field.kind === "integer" ? 1 : "any")}
         disabled={locked}
-        aria-describedby={helpId}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
         onChange={(event) => {
           const text = event.currentTarget.value;
-          if (text === "") onChange(undefined);
+          if (text === "") commit(undefined);
           else {
             const parsed = Number(text);
-            if (Number.isFinite(parsed)) onChange(parsed);
+            if (Number.isFinite(parsed)) commit(parsed);
           }
         }}
       />
@@ -540,6 +618,7 @@ function DesignParameterField({
         value={value}
         disabled={locked}
         describedBy={helpId}
+        validate={(candidate) => isDesignFieldValueValid(field, candidate)}
         onChange={onChange}
         onValidityChange={onValidityChange}
         t={t}
@@ -553,8 +632,9 @@ function DesignParameterField({
         value={typeof value === "string" ? value : ""}
         maxLength={field.maxLength ?? undefined}
         disabled={locked}
-        aria-describedby={helpId}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
+        onChange={(event) => commit(event.currentTarget.value)}
       />
     );
   } else {
@@ -565,8 +645,9 @@ function DesignParameterField({
         value={typeof value === "string" ? value : ""}
         maxLength={field.maxLength ?? undefined}
         disabled={locked}
-        aria-describedby={helpId}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
+        onChange={(event) => commit(event.currentTarget.value)}
       />
     );
   }
@@ -577,6 +658,9 @@ function DesignParameterField({
       <span id={helpId} className="mdlx-help">
         {field.disabledReason ?? field.description ?? (locked ? t("fieldUnavailable") : "")}
       </span>
+      {invalid && !jsonControl && (
+        <span id={errorId} className="mdlx-error">{t("invalidParameter")}</span>
+      )}
     </div>
   );
 }
@@ -586,6 +670,7 @@ function JsonParameter({
   value,
   disabled,
   describedBy,
+  validate,
   onChange,
   onValidityChange,
   t,
@@ -594,6 +679,7 @@ function JsonParameter({
   value: ClientJsonValue | undefined;
   disabled: boolean;
   describedBy: string;
+  validate: (value: ClientJsonValue | undefined) => boolean;
   onChange: (value: ClientJsonValue | undefined) => void;
   onValidityChange: (valid: boolean) => void;
   t: ModellixTranslate;
@@ -605,6 +691,7 @@ function JsonParameter({
   const [invalid, setInvalid] = useState(false);
   useEffect(() => {
     setText(value === undefined ? "" : JSON.stringify(value, null, 2));
+    setInvalid(false);
   }, [value]);
   return (
     <>
@@ -626,7 +713,9 @@ function JsonParameter({
           }
           try {
             const parsed: unknown = JSON.parse(next);
-            if (!isClientJsonValue(parsed)) throw new Error("invalid JSON value");
+            if (!isClientJsonValue(parsed) || !validate(parsed)) {
+              throw new Error("invalid JSON value");
+            }
             setInvalid(false);
             onValidityChange(true);
             onChange(parsed);
@@ -636,17 +725,19 @@ function JsonParameter({
           }
         }}
       />
-      {invalid && <span id={errorId} className="mdlx-error">{t("invalidJson")}</span>}
+      {invalid && <span id={errorId} className="mdlx-error">{t("invalidParameter")}</span>}
     </>
   );
 }
 
 function ProposalCard({
   snapshot,
+  parameters,
   controller,
   t,
 }: {
   snapshot: DesignSnapshotWire;
+  parameters: Readonly<Record<string, ClientJsonValue>>;
   controller: DesignController;
   t: ModellixTranslate;
 }): ReactNode {
@@ -690,7 +781,7 @@ function ProposalCard({
           type="button"
           variant="primary"
           disabled={busy || proposal.conflicts.length > 0}
-          onClick={() => { void controller.applyProposal(proposal.proposalId); }}
+          onClick={() => { void controller.applyProposal(proposal.proposalId, parameters); }}
         >
           {t("applyProposal")}
         </Button>
@@ -925,16 +1016,6 @@ function fieldAtPath(
   return fields.find((field) => field.path === path);
 }
 
-function isMissingParameter(
-  parameters: Readonly<Record<string, ClientJsonValue>>,
-  path: string,
-): boolean {
-  if (!Object.prototype.hasOwnProperty.call(parameters, path)) return true;
-  const value = parameters[path];
-  if (value === null || value === "") return true;
-  return Array.isArray(value) && value.length === 0;
-}
-
 function isClientJsonValue(value: unknown, depth = 0): value is ClientJsonValue {
   if (depth > 10) return false;
   if (value === null || typeof value === "boolean" || typeof value === "string") {
@@ -948,6 +1029,27 @@ function isClientJsonValue(value: unknown, depth = 0): value is ClientJsonValue 
   return Object.entries(value).every(
     ([, item]) => isClientJsonValue(item, depth + 1),
   );
+}
+
+function designOutcomeText(
+  transition: DesignOutcomeTransition,
+  t: ModellixTranslate,
+): string | null {
+  const messages: string[] = [];
+  if (transition.proposalReady) messages.push(t("proposalReadyAnnouncement"));
+  if (transition.succeeded > 0) {
+    messages.push(t("jobsSucceededAnnouncement", { count: transition.succeeded }));
+  }
+  if (transition.failed > 0) {
+    messages.push(t("jobsFailedAnnouncement", { count: transition.failed }));
+  }
+  if (transition.expired > 0) {
+    messages.push(t("jobsExpiredAnnouncement", { count: transition.expired }));
+  }
+  if (transition.running > 0) {
+    messages.push(t("jobsRunningAnnouncement", { count: transition.running }));
+  }
+  return messages.length === 0 ? null : messages.join(" ");
 }
 
 function operationText(

@@ -4,6 +4,7 @@ import type {
   ServiceTogglesWire,
   SettingsSnapshotWire,
 } from "./contracts.js";
+import { selectedDesignModel } from "./design-state.js";
 import { ModellixClientRpcError, ModellixRpcClient } from "./rpc.js";
 
 export type ClientOperation =
@@ -26,6 +27,7 @@ export interface ResourceState<T> {
   readonly data: T | null;
   readonly pending: ClientOperation | null;
   readonly errorCode: string | null;
+  readonly errorOperation: ClientOperation | null;
 }
 
 export interface SnapshotSource<T> {
@@ -39,6 +41,7 @@ class ResourceStore<T> implements SnapshotSource<ResourceState<T>> {
     data: null,
     pending: null,
     errorCode: null,
+    errorOperation: null,
   };
   readonly #listeners = new Set<() => void>();
 
@@ -70,6 +73,7 @@ abstract class ResourceController<T> {
       data: previous.data,
       pending: operation,
       errorCode: null,
+      errorOperation: null,
     });
     try {
       const data = await task();
@@ -79,6 +83,7 @@ abstract class ResourceController<T> {
         data,
         pending: null,
         errorCode: null,
+        errorOperation: null,
       });
       return true;
     } catch (error) {
@@ -89,6 +94,7 @@ abstract class ResourceController<T> {
           ...previous,
           pending: null,
           errorCode: null,
+          errorOperation: null,
         });
         return false;
       }
@@ -101,6 +107,7 @@ abstract class ResourceController<T> {
         data: latest,
         pending: null,
         errorCode,
+        errorOperation: operation,
       });
       return false;
     }
@@ -113,6 +120,7 @@ abstract class ResourceController<T> {
       data,
       pending: null,
       errorCode: null,
+      errorOperation: null,
     });
   }
 }
@@ -221,9 +229,17 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
     );
   }
 
-  propose(instruction: string, signal?: AbortSignal): Promise<boolean> {
-    const draft = this.store.getSnapshot().data?.draft;
+  propose(
+    instruction: string,
+    parameters: Readonly<Record<string, ClientJsonValue>>,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const snapshot = this.store.getSnapshot().data;
+    const draft = snapshot?.draft;
     if (draft === null || draft === undefined) return Promise.resolve(false);
+    if (snapshot === null || selectedDesignModel(snapshot)?.available !== true) {
+      return Promise.resolve(false);
+    }
     return this.perform("propose", () =>
       this.#rpc.proposeDesignParameters(
         {
@@ -232,15 +248,20 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
           instruction,
           draftRevision: draft.draftRevision,
           irContractHash: draft.irContractHash,
+          parameters,
         },
         signal,
       ),
     );
   }
 
-  applyProposal(proposalId: string, signal?: AbortSignal): Promise<boolean> {
+  applyProposal(
+    proposalId: string,
+    parameters: Readonly<Record<string, ClientJsonValue>>,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     return this.perform("apply-proposal", () =>
-      this.#rpc.applyDesignProposal(this.sessionId, proposalId, signal),
+      this.#rpc.applyDesignProposal(this.sessionId, proposalId, parameters, signal),
     );
   }
 
@@ -254,8 +275,12 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
     parameters: Readonly<Record<string, ClientJsonValue>>,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const draft = this.store.getSnapshot().data?.draft;
+    const snapshot = this.store.getSnapshot().data;
+    const draft = snapshot?.draft;
     if (draft === null || draft === undefined) return Promise.resolve(false);
+    if (snapshot === null || selectedDesignModel(snapshot)?.available !== true) {
+      return Promise.resolve(false);
+    }
     return this.perform("submit", () =>
       this.#rpc.submitDesign(
         {

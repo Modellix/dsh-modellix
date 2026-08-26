@@ -177,6 +177,18 @@ export interface DesignSnapshotWire {
   readonly notice: string | null;
 }
 
+export type DesignMutationWire =
+  | {
+      readonly version: 1;
+      readonly accepted: true;
+      readonly state: DesignSnapshotWire;
+    }
+  | {
+      readonly version: 1;
+      readonly accepted: false;
+      readonly code: string;
+    };
+
 export interface AckWire {
   readonly version: 1;
   readonly accepted: true;
@@ -214,13 +226,14 @@ const MAX_TEXT = 32_000;
 const MAX_SHORT_TEXT = 4_096;
 const MAX_ID = 256;
 const MAX_MODELS = 1_000;
-const MAX_FIELDS = 256;
-const MAX_OPTIONS = 256;
+const MAX_FIELDS = DESIGN_WIRE_LIMITS.maxFields;
+const MAX_OPTIONS = DESIGN_WIRE_LIMITS.maxOptions;
 const MAX_JOBS = 1_000;
-const MAX_RESOURCES = 32;
+const MAX_RESOURCES = DESIGN_WIRE_LIMITS.maxResources;
 const MAX_RESOURCE_URL = 16_384;
-const MAX_JSON_DEPTH = 10;
-const MAX_JSON_NODES = 4_096;
+const MAX_JSON_DEPTH = DESIGN_WIRE_LIMITS.maxJsonDepth;
+const MAX_JSON_NODES = DESIGN_WIRE_LIMITS.maxJsonNodes;
+const MAX_RPC_RESPONSE_DEPTH = MAX_JSON_DEPTH + 4;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const SAFE_HASH = /^[A-Za-z0-9._:-]{8,256}$/;
 const FORBIDDEN_RESPONSE_KEY =
@@ -314,6 +327,21 @@ export function parseDesignSnapshot(input: unknown): DesignSnapshotWire {
     notice:
       root.notice === null ? null : readable(root.notice, "notice", MAX_SHORT_TEXT),
   };
+}
+
+export function parseDesignMutation(input: unknown): DesignMutationWire {
+  assertNoSecretFields(input);
+  const root = object(input, "Design mutation");
+  version(root.version);
+  if (root.accepted === true) {
+    return { version: 1, accepted: true, state: parseDesignSnapshot(root.state) };
+  }
+  if (root.accepted === false) {
+    const error = object(root.error, "Design mutation error");
+    return { version: 1, accepted: false, code: stableErrorCode(error.code) };
+  }
+  // Accept the pre-envelope v1 success shape during a same-version Client/Host rollout.
+  return { version: 1, accepted: true, state: parseDesignSnapshot(input) };
 }
 
 export function parseAck(input: unknown): AckWire {
@@ -641,7 +669,7 @@ function parseDiagnostic(value: unknown): DesignDiagnosticWire {
 function assertNoSecretFields(value: unknown): void {
   const seen = new WeakSet<object>();
   const visit = (candidate: unknown, depth: number): void => {
-    if (depth > MAX_JSON_DEPTH) {
+    if (depth > MAX_RPC_RESPONSE_DEPTH) {
       throw new ModellixClientContractError("RPC response nesting is too deep");
     }
     if (typeof candidate !== "object" || candidate === null) return;
@@ -840,3 +868,4 @@ function version(value: unknown): void {
     throw new ModellixClientContractError("RPC wire version is unsupported");
   }
 }
+import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";

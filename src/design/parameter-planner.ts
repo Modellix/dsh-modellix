@@ -12,6 +12,12 @@ export interface NaturalLanguagePlan {
   readonly ignoredAssignments: readonly string[];
 }
 
+const UNSAFE_POINTER_TOKENS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
 /** Materializes only schema-declared defaults/const values and required objects. */
 export function materializeDefaults(
   schema: DesignSchemaIR,
@@ -462,7 +468,7 @@ function pointerTokens(path: string): string[] {
   if (!path.startsWith("/") || path.includes("/*")) {
     throw parameterError(`Invalid model field path: ${path}`);
   }
-  return path
+  const tokens = path
     .slice(1)
     .split("/")
     .map((token) => {
@@ -471,6 +477,10 @@ function pointerTokens(path: string): string[] {
       }
       return token.replaceAll("~1", "/").replaceAll("~0", "~");
     });
+  if (tokens.some((token) => UNSAFE_POINTER_TOKENS.has(token))) {
+    throw parameterError(`Unsafe model field path: ${path}`);
+  }
+  return tokens;
 }
 
 function toJsonValue(value: unknown, path: string): JsonValue {
@@ -484,11 +494,12 @@ function toJsonValue(value: unknown, path: string): JsonValue {
     return value.map((item, index) => toJsonValue(item, `${path}/${index}`));
   }
   if (typeof value === "object" && value !== null) {
-    const result: Record<string, JsonValue> = {};
-    for (const [key, item] of Object.entries(value)) {
-      result[key] = toJsonValue(item, `${path}/${key}`);
-    }
-    return result;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        toJsonValue(item, `${path}/${key}`),
+      ]),
+    );
   }
   throw parameterError(`Model field is not JSON-compatible: ${path}`);
 }

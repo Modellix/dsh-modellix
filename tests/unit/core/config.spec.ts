@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   OnboardingSaveConflictError,
   UnsupportedConfigVersionError,
+  abandonLlmMaterialization,
+  beginLlmMaterialization,
   beginOnboardingSave,
+  completeLlmMaterialization,
   completeOnboardingSave,
   createDefaultConfig,
   deferOnboarding,
@@ -51,6 +54,25 @@ describe("core config", () => {
     expect(first.services.design.enabled).toBe(true);
     expect(second).toEqual(first);
   });
+
+  it.each(["retain-input", "metadata-only", "unsupported"])(
+    "normalizes the legacy %s retention policy to metadata-only",
+    (retentionPolicy) => {
+      const first = migrateConfig({
+        services: {
+          design: {
+            retentionPolicy,
+            retentionPolicyRevision: 7,
+          },
+        },
+      });
+      const second = migrateConfig(first);
+
+      expect(first.services.design.retentionPolicy).toBe("metadata-only");
+      expect(first.services.design.retentionPolicyRevision).toBe(7);
+      expect(second).toEqual(first);
+    },
+  );
 
   it("rejects an unknown future schema instead of silently downgrading", () => {
     expect(() => migrateConfig({ schemaVersion: 2 })).toThrow(
@@ -213,5 +235,46 @@ describe("core config", () => {
       appliedRouteFingerprint: hash,
       entries: [{ kind: "model", key: "openai/gpt-5.6-sol", appliedFingerprint: hash }],
     });
+  });
+
+  it("persists and resolves a bounded non-secret LLM materialization marker", () => {
+    const operationId = "llm_materialization_1234";
+    const started = beginLlmMaterialization(createDefaultConfig(), {
+      operationId,
+      startedAt: 5_000,
+      expectedLlmSettingsRevision: 17,
+    });
+    expect(started.llmOwnership.materializationRecovery).toEqual({
+      operationId,
+      startedAt: 5_000,
+      expectedLlmSettingsRevision: 17,
+    });
+    expect(JSON.stringify(started)).not.toContain("apiKey");
+
+    const hash = "b".repeat(64);
+    const completed = completeLlmMaterialization(started, operationId, {
+      ownership: "created",
+      appliedRouteFingerprint: hash,
+      entries: [{ kind: "model", key: "openai/gpt-5.6-sol", appliedFingerprint: hash }],
+    });
+    expect(completed.llmOwnership.materializationRecovery).toBeNull();
+    expect(completed.llmOwnership.route.ownership).toBe("created");
+
+    const abandoned = abandonLlmMaterialization(started, operationId);
+    expect(abandoned.llmOwnership.materializationRecovery).toBeNull();
+    expect(abandoned.llmOwnership.route.ownership).toBe("none");
+  });
+
+  it("drops malformed LLM materialization recovery state during migration", () => {
+    const migrated = migrateConfig({
+      llmOwnership: {
+        materializationRecovery: {
+          operationId: "bad id with spaces",
+          startedAt: -1,
+          expectedLlmSettingsRevision: "secret-shaped-value",
+        },
+      },
+    });
+    expect(migrated.llmOwnership.materializationRecovery).toBeNull();
   });
 });

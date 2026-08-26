@@ -19,10 +19,11 @@ describe("DesignTaskRepository", () => {
       clock: { now: () => now },
     });
 
-    await repository.recordSubmitIntent("request-1", "openai/gpt-image-2");
+    await repository.recordSubmitIntent("request-1", "openai/gpt-image-2", 3);
     expect(await repository.listTasks()).toEqual([
       expect.objectContaining({
         requestId: "request-1",
+        credentialEpoch: 3,
         taskId: null,
         state: "submitting",
       }),
@@ -66,7 +67,7 @@ describe("DesignTaskRepository", () => {
   it("records an ambiguous POST as submit-unknown without duplicating it", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-2", "openai/gpt-image-2");
+    await repository.recordSubmitIntent("request-2", "openai/gpt-image-2", 4);
     await repository.markSubmitUnknown("request-2");
     expect(await repository.listTasks()).toEqual([
       expect.objectContaining({ state: "submit-unknown", taskId: null }),
@@ -79,7 +80,7 @@ describe("DesignTaskRepository", () => {
   it("closes a definitively rejected submit intent without making it retryable", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-rejected", "openai/gpt-image-2");
+    await repository.recordSubmitIntent("request-rejected", "openai/gpt-image-2", 5);
     await repository.markSubmitRejected("request-rejected");
 
     expect(await repository.listTasks()).toEqual([
@@ -93,11 +94,130 @@ describe("DesignTaskRepository", () => {
   it("stores a closed WAL shape that has no prompt or API-key fields", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-3", "openai/gpt-image-2");
+    await repository.recordSubmitIntent("request-3", "openai/gpt-image-2", 6);
     const serialized = [...memory.values.values()].join("");
     expect(serialized).not.toContain("prompt");
     expect(serialized).not.toContain("apiKey");
     expect(serialized).not.toContain("authorization");
+  });
+
+  it("does not append an unchanged polling observation", async () => {
+    const memory = memoryStorage();
+    const repository = new DesignTaskRepository({ storage: memory.storage });
+    await repository.recordSubmitIntent("request-stable", "openai/gpt-image-2", 7);
+    await repository.recordSubmitAccepted("request-stable", task("task-stable", "running"));
+    const writesBeforePoll = memory.writeCount();
+
+    await repository.recordTaskObserved(task("task-stable", "running"));
+
+    expect(memory.writeCount()).toBe(writesBeforePoll);
+  });
+
+  it("replays a persisted poll failure and clears it after a successful observation", async () => {
+    const memory = memoryStorage();
+    const repository = new DesignTaskRepository({ storage: memory.storage });
+    await repository.recordSubmitIntent("request-poll-failure", "openai/gpt-image-2", 9);
+    await repository.recordSubmitAccepted(
+      "request-poll-failure",
+      task("task-poll-failure", "running"),
+    );
+    await repository.recordPollFailure("task-poll-failure", {
+      attempt: 2,
+      nextPollAt: 70_000,
+      blocked: false,
+      code: "rate-limited",
+    });
+
+    const restarted = new DesignTaskRepository({ storage: memory.storage });
+    expect(await restarted.listTasks()).toEqual([
+      expect.objectContaining({
+        pollAttempt: 2,
+        nextPollAt: 70_000,
+        pollBlocked: false,
+        pollDiagnostic: "rate-limited",
+      }),
+    ]);
+
+    await restarted.recordTaskObserved(task("task-poll-failure", "running"));
+    expect(await restarted.listTasks()).toEqual([
+      expect.objectContaining({
+        pollAttempt: 0,
+        nextPollAt: 0,
+        pollBlocked: false,
+        pollDiagnostic: null,
+      }),
+    ]);
+  });
+
+  it("fails closed on a non-boolean persisted poll block state", async () => {
+    const repository = new DesignTaskRepository({
+      storage: {
+        read: async () => JSON.stringify({
+          version: 1,
+          events: [
+            {
+              type: "submit-intent",
+              sequence: 1,
+              timestamp: 1,
+              requestId: "request-invalid-block",
+              modelSlug: "openai/gpt-image-2",
+              credentialEpoch: 1,
+            },
+            {
+              type: "submit-accepted",
+              sequence: 2,
+              timestamp: 2,
+              requestId: "request-invalid-block",
+              task: task("task-invalid-block", "running"),
+            },
+            {
+              type: "task-poll-failed",
+              sequence: 3,
+              timestamp: 3,
+              taskId: "task-invalid-block",
+              attempt: 1,
+              nextPollAt: 10,
+              blocked: "false",
+              code: "poll-unavailable",
+            },
+          ],
+        }),
+        write: async () => undefined,
+      },
+    });
+
+    await expect(repository.listTasks()).rejects.toMatchObject({
+      code: "STORAGE_INVALID",
+    });
+  });
+
+  it("checkpoints the latest replayable task state when the event limit is reached", async () => {
+    const memory = memoryStorage();
+    let now = 1_000;
+    const repository = new DesignTaskRepository({
+      storage: memory.storage,
+      clock: { now: () => now },
+      maxEvents: 2,
+    });
+    await repository.recordSubmitIntent("request-compact", "openai/gpt-image-2", 8);
+    await repository.recordSubmitAccepted("request-compact", task("task-compact", "queued"));
+    now = 2_000;
+
+    await repository.recordTaskObserved(task("task-compact", "running"));
+
+    expect(await repository.listTasks()).toEqual([
+      expect.objectContaining({
+        requestId: "request-compact",
+        credentialEpoch: 8,
+        taskId: "task-compact",
+        state: "running",
+        updatedAt: 2_000,
+      }),
+    ]);
+    const stored = JSON.parse([...memory.values.values()].join("")) as {
+      events: readonly unknown[];
+    };
+    expect(stored.events).toHaveLength(2);
   });
 
   it("fails closed on corrupt storage", async () => {
@@ -120,12 +240,17 @@ describe("selectAvailableResults", () => {
       {
         requestId: "request-a",
         modelSlug: "openai/gpt-image-2",
+        credentialEpoch: 1,
         taskId: "task-a",
         state: "succeeded" as const,
         createdAt: 1_000,
         updatedAt: base,
         completedAt: base,
         expiresAt: base + 50_000,
+        pollAttempt: 0,
+        nextPollAt: 0,
+        pollBlocked: false,
+        pollDiagnostic: null,
         resources: [
           {
             kind: "image" as const,
@@ -144,12 +269,17 @@ describe("selectAvailableResults", () => {
       {
         requestId: "request-b",
         modelSlug: "acme/audio",
+        credentialEpoch: 1,
         taskId: "task-b",
         state: "succeeded" as const,
         createdAt: 2_000,
         updatedAt: base,
         completedAt: base,
         expiresAt: null,
+        pollAttempt: 0,
+        nextPollAt: 0,
+        pollBlocked: false,
+        pollDiagnostic: null,
         resources: [
           {
             kind: "audio" as const,
@@ -184,6 +314,18 @@ describe("selectAvailableResults", () => {
       ]),
     ).toThrowError(DesignError);
   });
+
+  it("rejects an unknown persisted WAL event type", () => {
+    expect(() =>
+      replayDesignWal([
+        {
+          type: "future-or-corrupt",
+          sequence: 1,
+          timestamp: 1,
+        } as never,
+      ]),
+    ).toThrowError(DesignError);
+  });
 });
 
 function task(
@@ -203,13 +345,17 @@ function task(
 function memoryStorage(): {
   readonly values: Map<string, string>;
   readonly storage: StoragePort;
+  readonly writeCount: () => number;
 } {
   const values = new Map<string, string>();
+  let writes = 0;
   return {
     values,
+    writeCount: () => writes,
     storage: {
       read: async (key) => values.get(key) ?? null,
       write: async (key, value) => {
+        writes += 1;
         values.set(key, value);
       },
     },

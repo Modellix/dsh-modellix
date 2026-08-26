@@ -4,7 +4,7 @@ import {
   MODELLIX_CLIENT_WIRE_VERSION,
   MODELLIX_RPC_CHANNEL,
   MODELLIX_RPC_ENDPOINTS,
-  parseDesignSnapshot,
+  parseDesignMutation,
   parseSettingsMutation,
   parseSettingsSnapshot,
   sanitizeParameters,
@@ -127,10 +127,9 @@ export class ModellixRpcClient {
   }
 
   design(sessionId: string, signal?: AbortSignal): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designRead,
       { sessionId },
-      parseDesignSnapshot,
       signal,
     );
   }
@@ -139,10 +138,9 @@ export class ModellixRpcClient {
     sessionId: string,
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designRefresh,
       { sessionId },
-      parseDesignSnapshot,
       signal,
     );
   }
@@ -152,10 +150,9 @@ export class ModellixRpcClient {
     modelId: string,
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designSelectModel,
       { sessionId, modelId },
-      parseDesignSnapshot,
       signal,
     );
   }
@@ -167,13 +164,13 @@ export class ModellixRpcClient {
       readonly instruction: string;
       readonly draftRevision: number;
       readonly irContractHash: string;
+      readonly parameters: Readonly<Record<string, ClientJsonValue>>;
     },
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designPropose,
-      input,
-      parseDesignSnapshot,
+      { ...input, parameters: sanitizeParameters(input.parameters) },
       signal,
     );
   }
@@ -181,12 +178,12 @@ export class ModellixRpcClient {
   applyDesignProposal(
     sessionId: string,
     proposalId: string,
+    parameters: Readonly<Record<string, ClientJsonValue>>,
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designProposalApply,
-      { sessionId, proposalId },
-      parseDesignSnapshot,
+      { sessionId, proposalId, parameters: sanitizeParameters(parameters) },
       signal,
     );
   }
@@ -196,10 +193,9 @@ export class ModellixRpcClient {
     proposalId: string,
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designProposalReject,
       { sessionId, proposalId },
-      parseDesignSnapshot,
       signal,
     );
   }
@@ -214,10 +210,9 @@ export class ModellixRpcClient {
     },
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
-    return this.#call(
+    return this.#designCall(
       MODELLIX_RPC_ENDPOINTS.designSubmit,
       { ...input, parameters: sanitizeParameters(input.parameters) },
-      parseDesignSnapshot,
       signal,
     );
   }
@@ -270,6 +265,16 @@ export class ModellixRpcClient {
       messageKey: mutation.messageKey,
       state: mutation.state,
     });
+  }
+
+  async #designCall(
+    endpoint: string,
+    payload: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+  ): Promise<DesignSnapshotWire> {
+    const mutation = await this.#call(endpoint, payload, parseDesignMutation, signal);
+    if (mutation.accepted) return mutation.state;
+    throw new ModellixClientRpcError(endpoint, mutation.code);
   }
 }
 

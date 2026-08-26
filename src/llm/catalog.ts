@@ -1,5 +1,6 @@
 import {
   parseRetryAfter,
+  readBoundedResponseJson,
   toModellixError,
   type ModellixErrorContract,
 } from "../core/index.js";
@@ -125,7 +126,12 @@ export class LlmCatalogClient {
       }));
     }
 
-    const raw = await readBoundedJson(response, this.#maxResponseBytes, credential.credentialEpoch);
+    const raw = await readBoundedJson(
+      response,
+      this.#maxResponseBytes,
+      credential.credentialEpoch,
+      signal,
+    );
     return {
       models: parseCatalog(raw, credential.credentialEpoch),
       credentialEpoch: credential.credentialEpoch,
@@ -216,16 +222,14 @@ async function readBoundedJson(
   response: Response,
   maximum: number,
   credentialEpoch: number,
+  signal?: AbortSignal,
 ): Promise<unknown> {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maximum) {
-    throw unexpected(credentialEpoch);
-  }
-  const text = await response.text();
-  if (new TextEncoder().encode(text).byteLength > maximum) throw unexpected(credentialEpoch);
   try {
-    return JSON.parse(text) as unknown;
-  } catch {
+    return await readBoundedResponseJson(response, maximum, signal);
+  } catch (error) {
+    if (signal?.aborted === true || isAbortError(error)) {
+      throw error;
+    }
     throw unexpected(credentialEpoch);
   }
 }

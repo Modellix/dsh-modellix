@@ -61,6 +61,7 @@ export async function readBoundedResponseText(
   if (declared !== null && /^\d+$/u.test(declared)) {
     const bytes = Number(declared);
     if (!Number.isSafeInteger(bytes) || bytes > maximumBytes) {
+      await response.body?.cancel().catch(() => undefined);
       throw new HttpResponseBoundaryError("BODY_TOO_LARGE", "Response exceeds the byte limit");
     }
   }
@@ -74,7 +75,7 @@ export async function readBoundedResponseText(
   try {
     while (true) {
       signal?.throwIfAborted();
-      const chunk = await reader.read();
+      const chunk = await readChunk(reader, signal);
       if (chunk.done) break;
       received += chunk.value.byteLength;
       if (received > maximumBytes) {
@@ -98,6 +99,33 @@ export async function readBoundedResponseText(
     throw error;
   } finally {
     reader.releaseLock();
+  }
+}
+
+async function readChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<
+  | { readonly done: true; readonly value: Uint8Array | undefined }
+  | { readonly done: false; readonly value: Uint8Array }
+> {
+  if (signal === undefined) {
+    return reader.read();
+  }
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = (): void => reject(
+      signal.reason ?? new DOMException("The operation was aborted", "AbortError"),
+    );
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([reader.read(), aborted]);
+  } finally {
+    if (onAbort !== undefined) {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 }
 

@@ -9,9 +9,12 @@ import type {
 import { systemClock, systemSleep } from "./ports.js";
 import type { JsonValue } from "./schema-ir.js";
 import { readBoundedResponseJson } from "../core/http.js";
+import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
 
 const PREDICTION_ORIGIN = "https://api.modellix.ai";
 const MAX_PREDICTION_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_INLINE_RETRY_DELAY_MS = 5_000;
+const MAX_PERSISTED_RETRY_AFTER_MS = 5 * 60_000;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CORRELATION_ID = /^[A-Za-z0-9._:-]{1,256}$/;
 
@@ -202,7 +205,7 @@ export class PredictionClient {
             throw new DesignError(
               "TASK_READ_FAILED",
               `Task status returned HTTP ${response.status}`,
-              { status: response.status },
+              { status: response.status, retryAfterMs: failure.retryAfterMs },
             );
           }
           lastFailure = failure;
@@ -266,7 +269,10 @@ export class PredictionClient {
     retryAfter: number | null,
     signal?: AbortSignal,
   ): Promise<void> {
-    const delay = Math.max(retryAfter ?? 0, Math.min(5_000, 250 * 2 ** (attempt - 1)));
+    const delay = Math.min(
+      MAX_INLINE_RETRY_DELAY_MS,
+      Math.max(retryAfter ?? 0, 250 * 2 ** (attempt - 1)),
+    );
     this.#log({
       level: "warn",
       event: "design.task.retry",
@@ -415,7 +421,7 @@ export function parseResources(
                   inheritedExpiresAt,
                 );
           if (resource !== null) {
-            grouped.push(resource);
+            appendResource(grouped, resource);
           }
         }
       }
@@ -429,10 +435,21 @@ export function parseResources(
   for (const candidate of candidates) {
     const parsed = parseResource(candidate, inheritedExpiresAt);
     if (parsed !== null) {
-      resources.push(parsed);
+      appendResource(resources, parsed);
     }
   }
   return resources;
+}
+
+function appendResource(
+  resources: PredictionResource[],
+  resource: PredictionResource | null,
+): void {
+  if (resource === null) return;
+  if (resources.length >= DESIGN_WIRE_LIMITS.maxResources) {
+    throw new DesignError("UNEXPECTED_RESPONSE", "Prediction response has too many resources");
+  }
+  resources.push(resource);
 }
 
 function parseResource(
@@ -633,11 +650,11 @@ function retryAfterMs(value: string | null, nowMs: number): number | null {
   }
   const trimmed = value.trim();
   if (/^\d+$/u.test(trimmed)) {
-    return Math.min(5_000, Number(trimmed) * 1_000);
+    return Math.min(MAX_PERSISTED_RETRY_AFTER_MS, Number(trimmed) * 1_000);
   }
   const parsed = Date.parse(trimmed);
   return Number.isFinite(parsed)
-    ? Math.min(5_000, Math.max(0, parsed - nowMs))
+    ? Math.min(MAX_PERSISTED_RETRY_AFTER_MS, Math.max(0, parsed - nowMs))
     : null;
 }
 

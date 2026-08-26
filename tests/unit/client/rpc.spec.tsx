@@ -209,7 +209,10 @@ describe("Modellix browser RPC adapter", () => {
   });
 
   it("sends Design actions through Host and never invents a cancel endpoint", async () => {
-    const transport = fakeRpc(async () => ({ ok: true, value: designState() }));
+    const transport = fakeRpc(async () => ({
+      ok: true,
+      value: { version: 1, accepted: true, state: designState() },
+    }));
     const client = new ModellixRpcClient(transport.rpc);
 
     await client.submitDesign({
@@ -235,7 +238,10 @@ describe("Modellix browser RPC adapter", () => {
   });
 
   it("refreshes the Design catalog through the bounded Host endpoint", async () => {
-    const transport = fakeRpc(async () => ({ ok: true, value: designState() }));
+    const transport = fakeRpc(async () => ({
+      ok: true,
+      value: { version: 1, accepted: true, state: designState() },
+    }));
     const client = new ModellixRpcClient(transport.rpc);
 
     await client.refreshDesignCatalog("session-1");
@@ -245,6 +251,30 @@ describe("Modellix browser RPC adapter", () => {
       endpoint: "design/refresh",
       payload: { version: 1, sessionId: "session-1" },
     });
+  });
+
+  it("surfaces safe Design business codes without forwarding Host prose", async () => {
+    const transport = fakeRpc(async () => ({
+      ok: true,
+      value: {
+        version: 1,
+        accepted: false,
+        error: {
+          code: "MODELLIX_RATE_LIMITED",
+          message: "untrusted upstream prose",
+        },
+      },
+    }));
+    const error = await new ModellixRpcClient(transport.rpc)
+      .design("session-1")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ModellixClientRpcError);
+    expect(error).toMatchObject({
+      code: "MODELLIX_RATE_LIMITED",
+      message: "The Modellix Host operation could not be completed",
+    });
+    expect(JSON.stringify(error)).not.toContain("upstream prose");
   });
 
   it("classifies a canonical outer RPC error without exposing its message", async () => {

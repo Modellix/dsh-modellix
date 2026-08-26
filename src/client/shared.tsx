@@ -18,6 +18,7 @@ import {
 } from "@deepseek-ai/dsh-client-ui-primitives";
 
 import { clearSecretInput, useDialogA11y } from "./a11y.js";
+import { presentClientError } from "./client-errors.js";
 import type { ServiceTogglesWire } from "./contracts.js";
 import type { ModellixLocaleKey } from "./locales.js";
 import type { ResourceState, SnapshotSource } from "./store.js";
@@ -38,10 +39,7 @@ export function useResourceState<T>(
 
 export function ErrorNotice({ code, t }: { code: string | null; t: ModellixTranslate }): ReactNode {
   if (code === null) return null;
-  const message =
-    code === "settings-changed" || code === "credential-changed"
-      ? t("errorConflict")
-      : t("errorGeneric");
+  const message = t(presentClientError(code).messageKey);
   return (
     <div className="mdlx-error" role="alert">
       {message}
@@ -206,16 +204,22 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
   } = props;
   const [draft, setDraft] = useState("");
   const [visible, setVisible] = useState(false);
+  const [displayedErrorCode, setDisplayedErrorCode] = useState<string | null>(
+    errorCode,
+  );
   const contentRef = useRef<HTMLDivElement | null>(null);
   const draftRef = useRef("");
   const keyId = useId();
   const helpId = `${keyId}-help`;
   const errorId = `${keyId}-error`;
+  const errorPresentation =
+    displayedErrorCode === null ? null : presentClientError(displayedErrorCode);
 
   const clear = useCallback((): void => {
     draftRef.current = "";
     setDraft("");
     setVisible(false);
+    setDisplayedErrorCode(null);
     clearSecretInput(contentRef.current);
   }, []);
   const close = useCallback((): void => {
@@ -233,6 +237,9 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
     draftRef.current = "";
     clearSecretInput(contentRef.current);
   }, []);
+  useEffect(() => {
+    setDisplayedErrorCode(errorCode);
+  }, [errorCode]);
 
   const submit = async (): Promise<void> => {
     const candidate = draftRef.current.trim();
@@ -271,14 +278,15 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
               autoComplete="new-password"
               spellCheck={false}
               placeholder={t("keyPlaceholder")}
-              aria-describedby={`${helpId}${errorCode === null ? "" : ` ${errorId}`}`}
-              aria-invalid={errorCode === null ? undefined : true}
+              aria-describedby={`${helpId}${errorPresentation?.credentialFieldInvalid === true ? ` ${errorId}` : ""}`}
+              aria-invalid={errorPresentation?.credentialFieldInvalid || undefined}
               data-mdlx-secret=""
               data-mdlx-initial-focus=""
               onChange={(event) => {
                 const value = event.currentTarget.value;
                 draftRef.current = value;
                 setDraft(value);
+                setDisplayedErrorCode(null);
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -307,9 +315,9 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
             t={t}
           />
         )}
-        {errorCode !== null && (
+        {errorPresentation !== null && (
           <div id={errorId} className="mdlx-error" role="alert">
-            {t("errorGeneric")}
+            {t(errorPresentation.messageKey)}
           </div>
         )}
         <a

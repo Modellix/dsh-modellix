@@ -10,14 +10,17 @@ function state(overrides: {
   readonly verification?: PromptState["credential"]["verification"];
   readonly status?: PromptState["onboarding"]["status"];
   readonly recoveryPending?: boolean;
+  readonly writable?: boolean;
+  readonly source?: PromptState["credential"]["source"];
 } = {}): PromptState {
   const configured = overrides.configured ?? false;
+  const writable = overrides.writable ?? true;
   return {
     credential: {
       configured,
-      source: configured ? "local" : null,
-      writable: true,
-      revision: configured ? 1 : null,
+      source: configured ? (overrides.source ?? (writable ? "local" : "env")) : null,
+      writable,
+      revision: configured ? "epoch:1" : null,
       credentialEpoch: configured ? 1 : 0,
       verification: overrides.verification ?? "unknown",
       invalidEpoch: null,
@@ -50,5 +53,20 @@ describe("Modellix onboarding prompt state", () => {
         state({ configured: true, verification: "invalid" }),
       ),
     ).toBe(true);
+  });
+
+  it("lets a user defer an invalid read-only environment Credential", () => {
+    const invalidEnvironment = {
+      configured: true,
+      source: "env" as const,
+      writable: false,
+      verification: "invalid" as const,
+    };
+    expect(shouldPromptOnboarding(state(invalidEnvironment))).toBe(true);
+    expect(
+      shouldPromptOnboarding(
+        state({ ...invalidEnvironment, status: "deferred" }),
+      ),
+    ).toBe(false);
   });
 });

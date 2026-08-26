@@ -6,6 +6,7 @@ import type { RpcResult } from "@deepseek-ai/dsh-host-apiproxy/api";
 import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
 import type {} from "@deepseek-ai/dsh-client-connection";
 import type {} from "@deepseek-ai/dsh-credentials";
+import type {} from "@deepseek-ai/dsh-llm";
 import type {} from "@deepseek-ai/dsh-settings";
 import type {} from "@deepseek-ai/dsh-storage-domain";
 import type {} from "@deepseek-ai/dsh-tools";
@@ -14,10 +15,13 @@ import type {} from "@deepseek-ai/dsh-web";
 import {
   MODELLIX_CREDENTIAL_REF,
   CredentialEpochConflictError,
+  abandonLlmMaterialization,
   applyCredentialDescriptor,
   applyRuntimeUnauthorized,
   applyVerificationResult,
   beginOnboardingSave,
+  beginLlmMaterialization,
+  completeLlmMaterialization,
   completeOnboardingSave,
   createCredentialState,
   deferOnboarding,
@@ -39,6 +43,8 @@ import {
   LlmRouteConflictError,
   LlmSettingsMaterializer,
   StaleLlmCatalogError,
+  verifyLlmRegistryBackread,
+  type LlmMaterializationReceipt,
   type LlmRouteLedger,
 } from "../llm/index.js";
 import { registerModellixWebProviders } from "../web/index.js";
@@ -57,6 +63,23 @@ import {
 
 const RPC_CHANNEL = "/modellix";
 const LLM_SETTINGS_NAMESPACE = settingsNamespace("llm-pi-ai");
+const LLM_OWNERSHIP_ROLLBACK_FAILED = "MODELLIX_LLM_OWNERSHIP_ROLLBACK_FAILED";
+const LLM_MATERIALIZATION_RECOVERED = "MODELLIX_LLM_MATERIALIZATION_RECOVERED";
+const LLM_MATERIALIZATION_RECOVERY_FAILED = "MODELLIX_LLM_MATERIALIZATION_RECOVERY_FAILED";
+
+class LlmOwnershipRollbackFailure extends Error {
+  constructor() {
+    super("The LLM settings rollback failed after the ownership ledger was not committed");
+    this.name = "LlmOwnershipRollbackFailure";
+  }
+}
+
+class LlmMaterializationRecoveryFailure extends Error {
+  constructor() {
+    super("The pending LLM materialization could not be recovered safely");
+    this.name = "LlmMaterializationRecoveryFailure";
+  }
+}
 
 export interface ModellixRuntimeState {
   readonly version: 1;
@@ -158,7 +181,7 @@ export class ModellixRuntime {
     });
     this.#userId = deriveModellixUserId(String(getOrCreateAnonymousUserId()));
     const catalogClient = new LlmCatalogClient({
-      resolveCredential: () => this.#credential.resolve(),
+      resolveCredential: () => this.resolveUsableCredential(),
     });
     this.#catalog = new LlmCatalogCache(catalogClient);
     this.#materializer = new LlmSettingsMaterializer({
@@ -182,7 +205,7 @@ export class ModellixRuntime {
     });
     this.#design = new DesignHostController({
       storage: designStorage,
-      resolveCredential: () => this.#credential.resolve(),
+      resolveCredential: () => this.resolveUsableCredential(),
       isCredentialEpochCurrent: (epoch) => epoch === this.#credential.credentialEpoch,
       onUnauthorized: (epoch) => {
         this.#credentialState = applyRuntimeUnauthorized(
@@ -202,6 +225,7 @@ export class ModellixRuntime {
       this.#credentialState,
       await this.#credential.describe(),
     );
+    const llmRecoveryReady = await this.reconcileInterruptedLlmMaterialization();
     await this.reconcileMissingCredentialState();
     this.syncDesignTools(this.#config.services.design.enabled);
     this.#ctx.effect(() => this.#settings.watch((next, previous) => {
@@ -248,7 +272,7 @@ export class ModellixRuntime {
         );
         this.#catalog.invalidate();
         this.#llm = { health: "unknown", modelCount: 0, refreshedAt: null };
-        if (this.#config.services.llm.enabled && this.#credentialState.descriptor.configured) {
+        if (this.#config.services.llm.enabled && this.credentialIsUsable()) {
           await this.refreshLlm(false, this.#lifecycleAbort.signal).catch(() => undefined);
         }
         this.scheduleDesignPoll(0);
@@ -257,9 +281,9 @@ export class ModellixRuntime {
 
     this.#ctx.effect(() => registerModellixWebProviders(this.#ctx.web, {
       isEnabled: () => this.#config.services.web.enabled,
-      hasCredential: () => this.#credentialState.descriptor.configured,
+      hasCredential: () => this.credentialIsUsable(),
       resolveCredential: async () => {
-        const hit = await this.#credential.resolve();
+        const hit = await this.resolveUsableCredential();
         return hit === undefined ? null : { apiKey: hit.value, credentialEpoch: hit.credentialEpoch };
       },
       getUserId: () => this.#userId,
@@ -293,8 +317,10 @@ export class ModellixRuntime {
       };
     }, "dsh-modellix: Design repository and polling");
 
-    if (!this.#config.services.llm.enabled) this.#llm.health = "disabled";
+    if (!llmRecoveryReady) this.#llm.health = "error";
+    else if (!this.#config.services.llm.enabled) this.#llm.health = "disabled";
     else if (!this.#credentialState.descriptor.configured) this.#llm.health = "missing";
+    else if (!this.credentialIsUsable()) this.#llm.health = "error";
     else void this.enqueueWrite(
       () => this.refreshLlm(false, this.#lifecycleAbort.signal).then(() => undefined),
     ).catch(() => undefined);
@@ -323,10 +349,10 @@ export class ModellixRuntime {
         default:
           if (endpoint.startsWith("design/")) {
             const snapshot = await this.enqueueDesignWrite(
-              () => this.#design.handle(endpoint, payload, signal),
+              () => this.#design.handle(endpoint, payload, operationSignal),
             );
             this.scheduleDesignPoll(5_000);
-            return success(snapshot);
+            return success({ version: 1, accepted: true, state: snapshot });
           }
           return badRequest("Unknown Modellix endpoint");
       }
@@ -352,9 +378,11 @@ export class ModellixRuntime {
         return success({ version: 1, accepted: false, error: error.contract });
       }
       if (error instanceof DesignError) {
-        return error.code === "INVALID_ARGUMENT" || error.code === "PARAMETER_INVALID"
-          ? badRequest("The Design request is invalid")
-          : internalError();
+        return success({
+          version: 1,
+          accepted: false,
+          error: { code: designRpcErrorCode(error) },
+        });
       }
       if (error instanceof StaleLlmCatalogError) {
         return success({ version: 1, accepted: false, reason: "credential-changed" });
@@ -534,7 +562,7 @@ export class ModellixRuntime {
         ...snapshot.config,
         credentialEpoch: mutation.credentialEpoch,
         onboarding: { status: "active", saveRecovery: null },
-        llmOwnership: { route: withoutRoute },
+        llmOwnership: { ...snapshot.config.llmOwnership, route: withoutRoute },
       }, snapshot.revision);
       this.#config = this.#settings.read().config;
       this.#credentialState = applyCredentialDescriptor(
@@ -542,7 +570,11 @@ export class ModellixRuntime {
         await this.#credential.describe(),
       );
       this.#catalog.invalidate();
-      this.#llm = { health: "missing", modelCount: 0, refreshedAt: null };
+      this.#llm = {
+        health: this.#credentialState.descriptor.configured ? "error" : "missing",
+        modelCount: 0,
+        refreshedAt: null,
+      };
       return { version: 1, accepted: true, state: await this.state() };
     });
   }
@@ -575,12 +607,12 @@ export class ModellixRuntime {
       let next = setServiceToggles(snapshot.config, services);
       if (!services.llm) {
         const ledger = await this.#materializer.remove(toLlmLedger(snapshot.config));
-        next = { ...next, llmOwnership: { route: ledger } };
+        next = { ...next, llmOwnership: { ...next.llmOwnership, route: ledger } };
         this.#llm = { health: "disabled", modelCount: 0, refreshedAt: null };
       }
       await this.#settings.replace(next, snapshot.revision);
       this.#config = this.#settings.read().config;
-      if (services.llm && this.#credentialState.descriptor.configured) {
+      if (services.llm && this.credentialIsUsable()) {
         await this.refreshLlm(false, this.#lifecycleAbort.signal).catch(() => undefined);
       }
       if (services.design) this.scheduleDesignPoll(0);
@@ -604,7 +636,7 @@ export class ModellixRuntime {
       if (!sameLlmLedger(ledger, snapshot.config.llmOwnership.route)) {
         await this.#settings.replace({
           ...snapshot.config,
-          llmOwnership: { route: ledger },
+          llmOwnership: { ...snapshot.config.llmOwnership, route: ledger },
         }, snapshot.revision);
         this.#config = this.#settings.read().config;
       }
@@ -615,12 +647,12 @@ export class ModellixRuntime {
       this.#credentialState,
       await this.#credential.describe(),
     );
-    if (!this.#credentialState.descriptor.configured) {
+    if (!this.credentialIsUsable()) {
       const ledger = await this.#materializer.remove(toLlmLedger(snapshot.config));
       if (!sameLlmLedger(ledger, snapshot.config.llmOwnership.route)) {
         await this.#settings.replace({
           ...snapshot.config,
-          llmOwnership: { route: ledger },
+          llmOwnership: { ...snapshot.config.llmOwnership, route: ledger },
         }, snapshot.revision);
         this.#config = this.#settings.read().config;
       }
@@ -635,12 +667,25 @@ export class ModellixRuntime {
       this.#llm = { health: "disabled", modelCount: 0, refreshedAt: null };
       return { version: 1, accepted: false, reason: "disabled" };
     }
-    if (!this.#credentialState.descriptor.configured) {
-      this.#llm = { health: "missing", modelCount: 0, refreshedAt: null };
-      return { version: 1, accepted: false, reason: "credential-missing" };
+    if (!this.credentialIsUsable()) {
+      const invalid = this.#credentialState.descriptor.configured;
+      this.#llm = {
+        health: invalid ? "error" : "missing",
+        modelCount: 0,
+        refreshedAt: null,
+      };
+      return {
+        version: 1,
+        accepted: false,
+        reason: invalid ? "credential-invalid" : "credential-missing",
+      };
     }
     const capturedEpoch = this.#config.credentialEpoch;
     try {
+      if (this.#config.llmOwnership.materializationRecovery !== null) {
+        const recovered = await this.reconcileInterruptedLlmMaterialization();
+        if (!recovered) throw new LlmMaterializationRecoveryFailure();
+      }
       signal?.throwIfAborted();
       const catalog = await this.#catalog.get(capturedEpoch, {
         force,
@@ -652,21 +697,68 @@ export class ModellixRuntime {
         capturedEpoch,
         this.#config.credentialEpoch,
       );
-      const ledger = await this.#materializer.materialize(catalog.models, toLlmLedger(this.#config));
-      // Settings mutation is the commit point. It has no cancellation seam,
-      // so once materialization started we must finish the companion plugin
-      // ledger before reporting cancellation. The lifecycle owns this refresh
-      // through #writeTail and therefore does not complete while that small
-      // consistency transaction is still in flight.
+      const materialization = await this.#materializer.prepareMaterialization(
+        catalog.models,
+        toLlmLedger(this.#config),
+      );
+      const ledger = materialization.ledger;
+      let operationId: string | null = null;
+      if (materialization.changed) {
+        const intentSnapshot = this.#settings.read();
+        if (
+          intentSnapshot.config.credentialEpoch !== capturedEpoch ||
+          !intentSnapshot.config.services.llm.enabled
+        ) {
+          throw new StaleLlmCatalogError(capturedEpoch, intentSnapshot.config.credentialEpoch);
+        }
+        operationId = `llm_${randomUUID().replaceAll("-", "")}`;
+        await this.#settings.replace(beginLlmMaterialization(intentSnapshot.config, {
+          operationId,
+          startedAt: Date.now(),
+          expectedLlmSettingsRevision: materialization.expectedSettingsRevision,
+        }), intentSnapshot.revision);
+        this.#config = this.#settings.read().config;
+      }
+      try {
+        await materialization.apply();
+      } catch (error) {
+        await this.compensateLlmMaterialization(materialization, operationId);
+        throw error;
+      }
+      // Once the write-ahead marker is durable, cancellation cannot split the
+      // independent route and ownership stores. Finish verification plus the
+      // ledger commit, or leave/clear recovery evidence after compensation.
+      try {
+        await verifyLlmRegistryBackread(this.#ctx.llm, catalog.models);
+      } catch (error) {
+        await this.compensateLlmMaterialization(materialization, operationId);
+        throw error;
+      }
       const snapshot = this.#settings.read();
       if (snapshot.config.credentialEpoch !== capturedEpoch || !snapshot.config.services.llm.enabled) {
-        await this.#materializer.remove(ledger);
+        await this.compensateLlmMaterialization(materialization, operationId);
         throw new StaleLlmCatalogError(capturedEpoch, snapshot.config.credentialEpoch);
       }
-      await this.#settings.replace({
-        ...snapshot.config,
-        llmOwnership: { route: ledger },
-      }, snapshot.revision);
+      try {
+        const committed = operationId === null
+          ? {
+              ...snapshot.config,
+              llmOwnership: { ...snapshot.config.llmOwnership, route: ledger },
+            }
+          : completeLlmMaterialization(snapshot.config, operationId, ledger);
+        await this.#settings.replace(committed, snapshot.revision);
+      } catch (error) {
+        const commitStatus = this.observeLlmOwnershipCommit(operationId, ledger);
+        if (commitStatus !== "committed") {
+          if (commitStatus === "pending") {
+            await this.compensateLlmMaterialization(materialization, operationId);
+          }
+          throw error;
+        }
+        // A provider may report an ambiguous transport failure after the CAS
+        // became durable. The read-back is authoritative; rolling back here
+        // would split an already committed ledger from its route.
+      }
       this.#config = this.#settings.read().config;
       this.#llm = { health: "ready", modelCount: catalog.models.length, refreshedAt: catalog.fetchedAt };
       this.#credentialState = applyVerificationResult(
@@ -697,6 +789,126 @@ export class ModellixRuntime {
         refreshedAt: this.#llm.refreshedAt,
       };
       throw error;
+    }
+  }
+
+  private async rollbackLlmMaterialization(
+    materialization: LlmMaterializationReceipt,
+  ): Promise<void> {
+    try {
+      await materialization.rollback();
+    } catch {
+      this.#llm = {
+        health: "error",
+        modelCount: this.#llm.modelCount,
+        refreshedAt: this.#llm.refreshedAt,
+      };
+      try {
+        this.#ctx.logger.error(
+          `${LLM_OWNERSHIP_ROLLBACK_FAILED}: failed to restore the previous LLM settings snapshot`,
+        );
+      } catch {
+        // Diagnostics must never prevent the safe non-ready state from sticking.
+      }
+      throw new LlmOwnershipRollbackFailure();
+    }
+  }
+
+  private async compensateLlmMaterialization(
+    materialization: LlmMaterializationReceipt,
+    operationId: string | null,
+  ): Promise<void> {
+    await this.rollbackLlmMaterialization(materialization);
+    if (operationId === null) return;
+    try {
+      await this.abandonPendingLlmMaterialization(operationId);
+    } catch {
+      this.recordLlmRecoveryDiagnostic(
+        "error",
+        `${LLM_MATERIALIZATION_RECOVERY_FAILED}: pending recovery marker could not be cleared`,
+      );
+      throw new LlmMaterializationRecoveryFailure();
+    }
+  }
+
+  private observeLlmOwnershipCommit(
+    operationId: string | null,
+    ledger: LlmRouteLedger,
+  ): "committed" | "pending" | "unknown" {
+    if (operationId === null) return "unknown";
+    try {
+      const observed = this.#settings.read().config.llmOwnership;
+      if (
+        observed.materializationRecovery === null &&
+        sameLlmLedger(ledger, observed.route)
+      ) return "committed";
+      return observed.materializationRecovery?.operationId === operationId
+        ? "pending"
+        : "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  private async abandonPendingLlmMaterialization(operationId: string): Promise<void> {
+    const snapshot = this.#settings.read();
+    const recovery = snapshot.config.llmOwnership.materializationRecovery;
+    if (recovery === null) return;
+    if (recovery.operationId !== operationId) throw new LlmMaterializationRecoveryFailure();
+    await this.#settings.replace(
+      abandonLlmMaterialization(snapshot.config, operationId),
+      snapshot.revision,
+    );
+    this.#config = this.#settings.read().config;
+  }
+
+  private async reconcileInterruptedLlmMaterialization(): Promise<boolean> {
+    const snapshot = this.#settings.read();
+    const recovery = snapshot.config.llmOwnership.materializationRecovery;
+    if (recovery === null) return true;
+    try {
+      const ledger = await this.#materializer.recoverInterruptedMaterialization(
+        toLlmLedger(snapshot.config),
+        recovery.expectedLlmSettingsRevision,
+      );
+      const current = this.#settings.read();
+      const currentRecovery = current.config.llmOwnership.materializationRecovery;
+      if (currentRecovery === null) {
+        this.#config = current.config;
+        return true;
+      }
+      if (currentRecovery.operationId !== recovery.operationId) {
+        throw new LlmMaterializationRecoveryFailure();
+      }
+      await this.#settings.replace(
+        completeLlmMaterialization(current.config, recovery.operationId, ledger),
+        current.revision,
+      );
+      this.#config = this.#settings.read().config;
+      this.recordLlmRecoveryDiagnostic(
+        "warn",
+        `${LLM_MATERIALIZATION_RECOVERED}: pending ownership was reconciled conservatively`,
+      );
+      return true;
+    } catch {
+      this.#llm = {
+        health: "error",
+        modelCount: this.#llm.modelCount,
+        refreshedAt: this.#llm.refreshedAt,
+      };
+      this.recordLlmRecoveryDiagnostic(
+        "error",
+        `${LLM_MATERIALIZATION_RECOVERY_FAILED}: pending ownership remains unresolved`,
+      );
+      return false;
+    }
+  }
+
+  private recordLlmRecoveryDiagnostic(level: "warn" | "error", message: string): void {
+    try {
+      this.#ctx.logger[level](message);
+    } catch {
+      // Fixed diagnostics are best effort and never carry the underlying error.
     }
   }
 
@@ -736,7 +948,7 @@ export class ModellixRuntime {
         ...snapshot.config,
         credentialEpoch: nextEpoch,
         onboarding: nextOnboarding,
-        llmOwnership: { route: ledger },
+        llmOwnership: { ...snapshot.config.llmOwnership, route: ledger },
       }, snapshot.revision);
       this.#config = this.#settings.read().config;
     }
@@ -751,6 +963,27 @@ export class ModellixRuntime {
     const run = this.#writeTail.then(operation);
     this.#writeTail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  private credentialIsUsable(): boolean {
+    const descriptor = this.#credentialState.descriptor;
+    return descriptor.configured && !(
+      this.#credentialState.verification === "invalid" &&
+      this.#credentialState.invalidEpoch?.credentialEpoch === descriptor.credentialEpoch
+    );
+  }
+
+  private async resolveUsableCredential(): Promise<
+    Awaited<ReturnType<CredentialBroker["resolve"]>>
+  > {
+    if (!this.credentialIsUsable()) return undefined;
+    const credential = await this.#credential.resolve();
+    if (
+      credential === undefined ||
+      credential.credentialEpoch !== this.#credentialState.descriptor.credentialEpoch ||
+      !this.credentialIsUsable()
+    ) return undefined;
+    return credential;
   }
 
   private enqueueDesignWrite<T>(operation: () => Promise<T>): Promise<T> {
@@ -786,9 +1019,14 @@ export class ModellixRuntime {
   private syncDesignTools(enabled: boolean): void {
     if (enabled && this.#disposeDesignTools === undefined) {
       this.#disposeDesignTools = registerModellixDesignTools(this.#ctx, {
-        handle: (endpoint, payload, signal) => this.enqueueDesignWrite(
-          () => this.#design.handle(endpoint, payload, signal),
-        ),
+        handle: (endpoint, payload, signal) => {
+          const operationSignal = signal === undefined
+            ? this.#lifecycleAbort.signal
+            : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
+          return this.enqueueDesignWrite(
+            () => this.#design.handle(endpoint, payload, operationSignal),
+          );
+        },
       });
       return;
     }
@@ -900,4 +1138,59 @@ function internalError(): RpcResult<unknown> {
       details: {},
     },
   };
+}
+
+function designRpcErrorCode(error: DesignError): string {
+  switch (error.status) {
+    case 401:
+      return "MODELLIX_UNAUTHORIZED";
+    case 402:
+      return "MODELLIX_BILLING_BLOCKED";
+    case 403:
+      return "MODELLIX_POLICY_BLOCKED";
+    case 408:
+      return "MODELLIX_TIMEOUT";
+    case 429:
+      return "MODELLIX_RATE_LIMITED";
+    default:
+      if (error.status !== null && error.status >= 500) return "MODELLIX_SERVER_ERROR";
+  }
+  switch (error.code) {
+    case "INVALID_ARGUMENT":
+    case "PARAMETER_INVALID":
+      return "MODELLIX_DESIGN_INPUT_INVALID";
+    case "MISSING_API_KEY":
+      return "MODELLIX_API_KEY_REQUIRED";
+    case "CATALOG_UNAVAILABLE":
+      return "MODELLIX_DESIGN_CATALOG_UNAVAILABLE";
+    case "SCHEMA_UNAVAILABLE":
+      return "MODELLIX_DESIGN_SCHEMA_UNAVAILABLE";
+    case "SCHEMA_INVALID":
+    case "UNEXPECTED_RESPONSE":
+    case "PLANNER_RESPONSE_INVALID":
+      return "MODELLIX_DESIGN_SCHEMA_INVALID";
+    case "ENDPOINT_NOT_ALLOWED":
+    case "PLANNER_FORBIDDEN":
+      return "MODELLIX_POLICY_BLOCKED";
+    case "SUBMIT_UNKNOWN":
+      return "MODELLIX_SUBMIT_UNKNOWN";
+    case "PLANNER_UNAUTHORIZED":
+      return "MODELLIX_UNAUTHORIZED";
+    case "PLANNER_BILLING_BLOCKED":
+      return "MODELLIX_BILLING_BLOCKED";
+    case "PLANNER_RATE_LIMITED":
+      return "MODELLIX_RATE_LIMITED";
+    case "PLANNER_TIMEOUT":
+      return "MODELLIX_TIMEOUT";
+    case "PLANNER_UNAVAILABLE":
+      return "MODELLIX_SERVER_ERROR";
+    case "PLANNER_ABORTED":
+      return "cancelled";
+    case "SUBMIT_REJECTED":
+    case "TASK_READ_FAILED":
+      return "MODELLIX_SERVER_ERROR";
+    case "STORAGE_INVALID":
+    case "PLANNER_REJECTED":
+      return "internal";
+  }
 }

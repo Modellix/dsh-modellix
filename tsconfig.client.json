@@ -19,6 +19,9 @@
   "include": [
     "src/client/**/*.ts",
     "src/client/**/*.tsx",
+    "src/shared/**/*.ts",
+    "tests/unit/client/**/*.ts",
+    "tests/unit/client/**/*.tsx",
     "tests/browser/**/*.ts",
     "tests/browser/**/*.tsx",
     "vitest.config.ts"

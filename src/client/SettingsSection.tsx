@@ -185,7 +185,9 @@ export function ModellixSettingsSection({
         title={credential.configured ? t("replaceKey") : t("configureKey")}
         description={t("onboardingDescription")}
         busy={state.pending === "replace-credential"}
-        errorCode={state.errorCode}
+        errorCode={
+          state.errorOperation === "replace-credential" ? state.errorCode : null
+        }
         onSave={(apiKey) =>
           controller.replaceCredential(
             apiKey,
@@ -204,7 +206,9 @@ export function ModellixSettingsSection({
       <RemoveCredentialDialog
         open={removeOpen}
         busy={state.pending === "remove-credential"}
-        errorCode={state.errorCode}
+        errorCode={
+          state.errorOperation === "remove-credential" ? state.errorCode : null
+        }
         onClose={() => setRemoveOpen(false)}
         onConfirm={() => {
           if (state.pending !== null) return;

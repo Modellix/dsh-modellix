@@ -55,6 +55,7 @@
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-input-trigger",
         "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
@@ -68,6 +69,7 @@
     "build:host": "tsdown --env.DSH_BUILD_FACE host",
     "build:client": "tsdown --env.DSH_BUILD_FACE client",
     "build": "pnpm run build:host && pnpm run build:client",
+    "verify:pack": "pnpm run build && node scripts/verify-pack.mjs",
     "check": "pnpm run verify:env && pnpm run typecheck && pnpm run lint && pnpm run test",
     "prepack": "pnpm run build"
   },
@@ -101,6 +103,7 @@
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-input-trigger": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-tool": "0.1.1-rc.2",
     "@deepseek-ai/dsh-credentials": "0.1.1-rc.2",
@@ -123,6 +126,7 @@
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-input-trigger": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",

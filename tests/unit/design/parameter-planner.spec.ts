@@ -8,6 +8,7 @@ import {
   materializeDefaults,
 } from "../../../src/design/parameter-planner.js";
 import { parseDesignSchema } from "../../../src/design/schema-ir.js";
+import type { DesignSchemaIR } from "../../../src/design/schema-ir.js";
 
 const schema = parseDesignSchema({
   type: "object",
@@ -121,4 +122,42 @@ describe("parameter planner", () => {
       buildInvocationBody(schema, { prompt: "ok", invented: true }),
     ).toThrowError("Unknown model field");
   });
+
+  it.each(["__proto__", "constructor", "prototype"])(
+    "rejects unsafe JSON Pointer token %s even for a forged IR",
+    (token) => {
+      const safe = parseDesignSchema({
+        type: "object",
+        properties: {
+          container: {
+            type: "object",
+            properties: { prompt: { type: "string" } },
+          },
+        },
+      });
+      const container = safe.fields[0]!;
+      const prompt = container.properties[0]!;
+      const unsafe: DesignSchemaIR = {
+        ...safe,
+        supported: true,
+        fields: [{
+          ...container,
+          key: token,
+          path: `/${token}`,
+          properties: [{ ...prompt, path: `/${token}/prompt` }],
+        }],
+        primaryPromptPath: `/${token}/prompt`,
+      };
+      const prototype = Object.prototype as Record<string, unknown>;
+      delete prototype.polluted;
+      try {
+        expect(() => applyExactPatch(unsafe, {}, {
+          set: { [`/${token}/prompt`]: "polluted" },
+        })).toThrowError("Unsafe model field path");
+        expect(prototype.polluted).toBeUndefined();
+      } finally {
+        delete prototype.polluted;
+      }
+    },
+  );
 });

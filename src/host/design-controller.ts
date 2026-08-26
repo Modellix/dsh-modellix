@@ -15,12 +15,14 @@ import {
   type CacheEntry,
   type CachePort,
   type DesignModelSummary,
+  type DesignPollDiagnosticCode,
   type DesignSchemaIR,
   type DesignTaskRecord,
   type JsonValue,
   type StoragePort,
   type UiField,
 } from "../design/index.js";
+import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
 
 const DESIGN_CATEGORIES = ["image", "video", "audio"] as const;
 const MODEL_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -59,6 +61,7 @@ interface DesignDraftState {
 interface DesignProposalState {
   readonly wire: DesignProposalWire;
   readonly parameters: Readonly<Record<string, JsonValue>>;
+  readonly baseParametersHash: string;
 }
 
 interface DesignSessionState {
@@ -67,6 +70,7 @@ interface DesignSessionState {
   proposal: DesignProposalState | null;
   notice: string | null;
   touchedAt: number;
+  nextDraftRevision: number;
 }
 
 interface DesignModelWire {
@@ -160,6 +164,8 @@ export class DesignHostController {
   readonly #sessions = new Map<string, DesignSessionState>();
   #lastModels: readonly DesignModelWire[] = [];
   #catalogNotice: string | null = null;
+  #catalogCredentialEpoch: number | null = null;
+  #pollCursor = 0;
 
   constructor(options: DesignHostControllerOptions) {
     this.#repository = new DesignTaskRepository({ storage: options.storage });
@@ -189,7 +195,7 @@ export class DesignHostController {
       case "design/propose":
         return this.propose(parseProposalPayload(payload), signal);
       case "design/proposal/apply":
-        return this.applyProposal(parseProposalMutationPayload(payload), signal);
+        return this.applyProposal(parseApplyProposalPayload(payload), signal);
       case "design/proposal/reject":
         return this.rejectProposal(parseProposalMutationPayload(payload), signal);
       case "design/submit":
@@ -205,9 +211,18 @@ export class DesignHostController {
     const credential = await this.#resolveCredential();
     if (credential === undefined) return false;
     const tasks = await this.#repository.listTasks();
-    const running = tasks.filter((task) =>
-      task.taskId !== null && (task.state === "queued" || task.state === "running"));
-    for (const record of running.slice(0, 5)) {
+    const active = tasks.filter((task) =>
+      task.taskId !== null && task.credentialEpoch === credential.credentialEpoch &&
+      !task.pollBlocked &&
+      (task.state === "queued" || task.state === "running" || task.state === "unknown"));
+    const eligible = active
+      .filter((task) => task.nextPollAt <= this.#now())
+      .sort((left, right) => left.createdAt - right.createdAt ||
+        String(left.taskId).localeCompare(String(right.taskId)));
+    const start = eligible.length === 0 ? 0 : this.#pollCursor % eligible.length;
+    const batch = circularSlice(eligible, start, 5);
+    this.#pollCursor = eligible.length === 0 ? 0 : (start + batch.length) % eligible.length;
+    for (const record of batch) {
       if (!this.#isCredentialEpochCurrent(credential.credentialEpoch)) break;
       try {
         const task = await new PredictionClient({ fetch: this.#fetch }).readTask({
@@ -218,11 +233,17 @@ export class DesignHostController {
         });
         await this.#repository.recordTaskObserved(task);
       } catch (error) {
+        if (signal?.aborted === true) throw error;
+        const failure = classifyPollFailure(error, record.pollAttempt + 1, this.#now());
+        await this.#repository.recordPollFailure(record.taskId as string, failure);
         await this.#markUnauthorized(error, credential.credentialEpoch);
       }
     }
     const after = await this.#repository.listTasks();
-    return after.some((task) => task.state === "queued" || task.state === "running");
+    return after.some((task) =>
+      task.credentialEpoch === credential.credentialEpoch &&
+      !task.pollBlocked &&
+      (task.state === "queued" || task.state === "running" || task.state === "unknown"));
   }
 
   private async read(
@@ -237,7 +258,9 @@ export class DesignHostController {
       if (modelId !== null) {
         session.selectedModelId = modelId;
         try {
-          session.draft = await this.#loadDraft(modelId, 0, signal);
+          const revision = session.nextDraftRevision;
+          session.nextDraftRevision += 1;
+          session.draft = await this.#loadDraft(modelId, revision, signal);
           session.notice = null;
         } catch (error) {
           session.draft = null;
@@ -274,11 +297,9 @@ export class DesignHostController {
     if (selected === undefined || !selected.available) {
       throw new DesignError("INVALID_ARGUMENT", "The selected model is unavailable");
     }
-    const draft = await this.#loadDraft(
-      input.modelId,
-      (session.draft?.revision ?? -1) + 1,
-      signal,
-    );
+    const revision = session.nextDraftRevision;
+    session.nextDraftRevision += 1;
+    const draft = await this.#loadDraft(input.modelId, revision, signal);
     session.selectedModelId = input.modelId;
     session.draft = draft;
     session.proposal = null;
@@ -293,10 +314,19 @@ export class DesignHostController {
     readonly instruction: string;
     readonly draftRevision: number;
     readonly irContractHash: string;
+    readonly parameters: Readonly<Record<string, unknown>>;
   }, signal?: AbortSignal): Promise<DesignSnapshotWire> {
     if (!this.#isEnabled()) throw new DesignError("INVALID_ARGUMENT", "Design is disabled");
     const session = this.#session(input.sessionId);
+    const models = await this.#loadModelsSafely(signal);
+    const selected = models.find((model) => model.id === input.modelId);
+    if (selected === undefined || !selected.available) {
+      throw new DesignError("INVALID_ARGUMENT", "The selected model is unavailable");
+    }
     const draft = requireDraft(session, input.modelId, input.draftRevision, input.irContractHash);
+    const currentParameters = applyExactPatch(draft.schema, materializeDefaults(draft.schema), {
+      set: input.parameters,
+    });
     const credential = await this.#resolveCredential();
     if (credential === undefined) throw new DesignError("MISSING_API_KEY", "A Modellix API key is required");
     let planned: Awaited<ReturnType<DesignPlannerClient["plan"]>>;
@@ -304,7 +334,7 @@ export class DesignHostController {
       planned = await new DesignPlannerClient({ fetch: this.#fetch }).plan({
         apiKey: credential.value,
         schema: draft.schema,
-        current: draft.parameters,
+        current: currentParameters,
         instruction: input.instruction,
         ...(signal === undefined ? {} : { signal }),
       });
@@ -324,7 +354,7 @@ export class DesignHostController {
     const changes = changedPaths.flatMap((path): DesignProposalChangeWire[] => {
       const field = fields.get(path);
       if (field === undefined) return [];
-      const before = pointerValue(draft.parameters, path);
+      const before = pointerValue(currentParameters, path);
       const after = pointerValue(planned.parameters, path);
       if (jsonEqual(before, after)) return [];
       return [{
@@ -342,13 +372,18 @@ export class DesignHostController {
       changes,
       conflicts: planned.needsClarification === null ? [] : [planned.needsClarification],
     };
-    session.proposal = { wire, parameters: planned.parameters };
+    session.proposal = {
+      wire,
+      parameters: planned.parameters,
+      baseParametersHash: jsonFingerprint(currentParameters),
+    };
     return this.#snapshot(session, await this.#loadModelsSafely(signal));
   }
 
   private async applyProposal(input: {
     readonly sessionId: string;
     readonly proposalId: string;
+    readonly parameters: Readonly<Record<string, unknown>>;
   }, signal?: AbortSignal): Promise<DesignSnapshotWire> {
     const session = this.#session(input.sessionId);
     const proposal = session.proposal;
@@ -360,7 +395,14 @@ export class DesignHostController {
     ) {
       throw new DesignError("INVALID_ARGUMENT", "The Design proposal is stale");
     }
+    const currentParameters = applyExactPatch(draft.schema, materializeDefaults(draft.schema), {
+      set: input.parameters,
+    });
+    if (jsonFingerprint(currentParameters) !== proposal.baseParametersHash) {
+      throw new DesignError("INVALID_ARGUMENT", "The Design parameters changed after the proposal");
+    }
     session.draft = { ...draft, revision: draft.revision + 1, parameters: proposal.parameters };
+    session.nextDraftRevision = Math.max(session.nextDraftRevision, draft.revision + 2);
     session.proposal = null;
     return this.#snapshot(session, await this.#loadModelsSafely(signal));
   }
@@ -386,6 +428,11 @@ export class DesignHostController {
   }, signal?: AbortSignal): Promise<DesignSnapshotWire> {
     if (!this.#isEnabled()) throw new DesignError("INVALID_ARGUMENT", "Design is disabled");
     const session = this.#session(input.sessionId);
+    const models = await this.#loadModelsSafely(signal);
+    const selected = models.find((model) => model.id === input.modelId);
+    if (selected === undefined || !selected.available) {
+      throw new DesignError("INVALID_ARGUMENT", "The selected model is unavailable");
+    }
     const draft = requireDraft(session, input.modelId, input.draftRevision, input.irContractHash);
     const credential = await this.#resolveCredential();
     if (credential === undefined) throw new DesignError("MISSING_API_KEY", "A Modellix API key is required");
@@ -396,7 +443,10 @@ export class DesignHostController {
       ...splitModel(input.modelId),
       signal,
     );
-    const schema = parseDesignSchema(schemaDocument.document);
+    const schema = parseDesignSchema(schemaDocument.document, {
+      maxDepth: DESIGN_WIRE_LIMITS.maxJsonDepth,
+      maxNodes: DESIGN_WIRE_LIMITS.maxJsonNodes,
+    });
     if (schemaDocument.submitUrl === null || schema.schemaHash !== draft.schema.schemaHash) {
       throw new DesignError("SCHEMA_INVALID", "The model schema changed; reload the draft");
     }
@@ -409,7 +459,11 @@ export class DesignHostController {
     const body = buildInvocationBody(schema, parameters);
     const requestId = `request_${randomUUID().replaceAll("-", "")}`;
     signal?.throwIfAborted();
-    await this.#repository.recordSubmitIntent(requestId, input.modelId);
+    await this.#repository.recordSubmitIntent(
+      requestId,
+      input.modelId,
+      credential.credentialEpoch,
+    );
 
     // Advancing before the one-shot POST is the in-process replay fence: a
     // lost RPC response cannot be submitted again with the stale revision.
@@ -419,9 +473,11 @@ export class DesignHostController {
       schema,
       parameters,
     };
+    session.nextDraftRevision = Math.max(session.nextDraftRevision, draft.revision + 2);
     session.proposal = null;
+    let task: Awaited<ReturnType<PredictionClient["submit"]>>;
     try {
-      const task = await new PredictionClient({ fetch: this.#fetch }).submit({
+      task = await new PredictionClient({ fetch: this.#fetch }).submit({
         endpoint: schemaDocument.submitUrl,
         modelSlug: input.modelId,
         apiKey: credential.value,
@@ -429,7 +485,6 @@ export class DesignHostController {
         requestId,
         ...(signal === undefined ? {} : { signal }),
       });
-      await this.#repository.recordSubmitAccepted(requestId, task);
     } catch (error) {
       if (error instanceof DesignError && error.code === "SUBMIT_UNKNOWN") {
         await this.#repository.markSubmitUnknown(requestId);
@@ -438,6 +493,27 @@ export class DesignHostController {
       }
       await this.#markUnauthorized(error, credential.credentialEpoch);
       throw error;
+    }
+    try {
+      await this.#repository.recordSubmitAccepted(requestId, task);
+    } catch (firstPersistenceError) {
+      try {
+        // Safe local retry only. recordSubmitAccepted is idempotent for the
+        // same task so this also covers providers that committed before
+        // surfacing an uncertain write completion.
+        await this.#repository.recordSubmitAccepted(requestId, task);
+      } catch {
+        try {
+          // The remote POST succeeded, so this must never become "rejected".
+          // If the task core still cannot be committed, preserve the honest
+          // non-replayable state whenever storage remains writable enough.
+          await this.#repository.markSubmitUnknown(requestId);
+        } catch {
+          // A committed accepted event makes this transition invalid; a fully
+          // unavailable store leaves the original intent as the recovery fence.
+        }
+        throw firstPersistenceError;
+      }
     }
     return this.#snapshot(session, await this.#loadModelsSafely(signal));
   }
@@ -456,7 +532,10 @@ export class DesignHostController {
     if (document.submitUrl === null) {
       throw new DesignError("SCHEMA_INVALID", "The model schema has no authoritative endpoint");
     }
-    const schema = parseDesignSchema(document.document);
+    const schema = parseDesignSchema(document.document, {
+      maxDepth: DESIGN_WIRE_LIMITS.maxJsonDepth,
+      maxNodes: DESIGN_WIRE_LIMITS.maxJsonNodes,
+    });
     if (!schema.supported || schema.primaryPromptPath === null) {
       throw new DesignError("SCHEMA_INVALID", "The model schema is not supported by Design");
     }
@@ -480,22 +559,30 @@ export class DesignHostController {
 
   async #loadModels(signal?: AbortSignal): Promise<readonly DesignModelWire[]> {
     const credential = await this.#resolveCredential();
+    this.#bindCatalogCredential(credential?.credentialEpoch ?? null);
     if (credential === undefined) return [];
     const client = new ModelCatalogClient({
       fetch: this.#fetch,
       getApiKey: () => credential.value,
-      cache: this.#cache,
+      cache: new NamespacedCache(this.#cache, `credential-${String(credential.credentialEpoch)}:`),
     });
     try {
-      const pages = await Promise.all(DESIGN_CATEGORIES.map(async (category) => {
+      const loadCategory = async (
+        category: typeof DESIGN_CATEGORIES[number],
+        featured: boolean,
+      ): Promise<readonly DesignModelSummary[]> => {
         const items: DesignModelSummary[] = [];
         for (let page = 1; page <= MAX_CATALOG_PAGES_PER_CATEGORY; page += 1) {
-          const result = await client.list({ category, page, pageSize: 100 }, signal);
+          const result = await client.list({ category, page, pageSize: 100, featured }, signal);
           items.push(...result.items);
           if (!result.hasMore || items.length >= 1_000) break;
         }
         return items;
-      }));
+      };
+      const [pages, featuredPages] = await Promise.all([
+        Promise.all(DESIGN_CATEGORIES.map((category) => loadCategory(category, false))),
+        Promise.all(DESIGN_CATEGORIES.map((category) => loadCategory(category, true))),
+      ]);
       if (!this.#isCredentialEpochCurrent(credential.credentialEpoch)) return this.#lastModels;
       const merged = new Map<string, DesignModelSummary>();
       for (const item of pages.flat()) {
@@ -505,12 +592,12 @@ export class DesignHostController {
           categories: [...new Set([...prior.categories, ...item.categories])],
         });
       }
-      const preferred = chooseDefaultModelFromSummaries([...merged.values()], this.#getLastModel());
-      return [...merged.values()].slice(0, 1_000).map((model, index) => ({
+      const featuredSlugs = new Set(featuredPages.flat().map((model) => model.slug));
+      return [...merged.values()].slice(0, 1_000).map((model) => ({
         id: model.slug,
         label: model.displayName,
         kind: model.categories[0] ?? "unknown",
-        featured: model.slug === preferred || (preferred === null && index === 0),
+        featured: featuredSlugs.has(model.slug),
         available: true,
         unavailableReason: null,
       }));
@@ -524,7 +611,8 @@ export class DesignHostController {
     session: DesignSessionState,
     currentModels: readonly DesignModelWire[],
   ): Promise<DesignSnapshotWire> {
-    const credentialReady = (await this.#resolveCredential()) !== undefined;
+    const credential = await this.#resolveCredential();
+    const credentialReady = credential !== undefined;
     const models = ensureSelectedModel(currentModels, session.selectedModelId);
     const tasks = [...await this.#repository.listTasks()]
       .sort((left, right) => right.updatedAt - left.updatedAt);
@@ -536,7 +624,8 @@ export class DesignHostController {
       selectedModelId: session.selectedModelId,
       draft: session.draft === null ? null : draftWire(session.draft),
       proposal: session.proposal?.wire ?? null,
-      jobs: tasks.slice(0, 1_000).map((task) => taskWire(task, this.#now())),
+      jobs: tasks.slice(0, 1_000).map((task) =>
+        taskWire(task, this.#now(), credential?.credentialEpoch ?? null)),
       notice: session.notice ?? this.#catalogNotice,
     };
   }
@@ -558,6 +647,7 @@ export class DesignHostController {
       proposal: null,
       notice: null,
       touchedAt: this.#now(),
+      nextDraftRevision: 0,
     };
     this.#sessions.set(sessionId, created);
     return created;
@@ -566,6 +656,22 @@ export class DesignHostController {
   async #markUnauthorized(error: unknown, credentialEpoch: number): Promise<void> {
     if (error instanceof DesignError && error.status === 401) {
       await this.#onUnauthorized(credentialEpoch);
+    }
+  }
+
+  #bindCatalogCredential(credentialEpoch: number | null): void {
+    if (credentialEpoch === this.#catalogCredentialEpoch) return;
+    const previousEpoch = this.#catalogCredentialEpoch;
+    this.#catalogCredentialEpoch = credentialEpoch;
+    this.#cache.clear();
+    this.#lastModels = [];
+    this.#catalogNotice = null;
+    if (previousEpoch === null) return;
+    for (const session of this.#sessions.values()) {
+      session.selectedModelId = null;
+      session.draft = null;
+      session.proposal = null;
+      session.notice = "The Modellix credential changed; the Design model and parameters were reloaded.";
     }
   }
 }
@@ -586,6 +692,21 @@ class MemoryCache implements CachePort {
   }
 }
 
+class NamespacedCache implements CachePort {
+  constructor(
+    readonly base: CachePort,
+    readonly prefix: string,
+  ) {}
+
+  read<T>(key: string): Promise<CacheEntry<T> | null> {
+    return this.base.read<T>(`${this.prefix}${key}`);
+  }
+
+  write<T>(key: string, entry: CacheEntry<T>): Promise<void> {
+    return this.base.write(`${this.prefix}${key}`, entry);
+  }
+}
+
 function parseSessionPayload(payload: unknown): { readonly sessionId: string } {
   const input = record(payload);
   return { sessionId: safeSessionId(input.sessionId) };
@@ -602,6 +723,7 @@ function parseProposalPayload(payload: unknown): {
   readonly instruction: string;
   readonly draftRevision: number;
   readonly irContractHash: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
 } {
   const input = record(payload);
   if (typeof input.instruction !== "string" || input.instruction.length > 64 * 1024) {
@@ -613,7 +735,17 @@ function parseProposalPayload(payload: unknown): {
     instruction: input.instruction,
     draftRevision: natural(input.draftRevision, "draftRevision"),
     irContractHash: safeHash(input.irContractHash),
+    parameters: record(input.parameters),
   };
+}
+
+function parseApplyProposalPayload(payload: unknown): {
+  readonly sessionId: string;
+  readonly proposalId: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+} {
+  const input = parseProposalMutationPayload(payload);
+  return { ...input, parameters: record(record(payload).parameters) };
 }
 
 function parseProposalMutationPayload(payload: unknown): {
@@ -661,7 +793,11 @@ function requireDraft(
 }
 
 function draftWire(draft: DesignDraftState): NonNullable<DesignSnapshotWire["draft"]> {
-  const fields = flattenUiFields(draft.schema.fields).map(fieldWire);
+  const flattened = flattenUiFields(draft.schema.fields);
+  if (flattened.length > DESIGN_WIRE_LIMITS.maxFields) {
+    throw new DesignError("SCHEMA_INVALID", "The model schema has too many Design fields");
+  }
+  const fields = flattened.map(fieldWire);
   const promptPath = draft.schema.primaryPromptPath;
   if (promptPath === null || !fields.some((field) => field.path === promptPath)) {
     throw new DesignError("SCHEMA_INVALID", "The Design prompt field is unavailable");
@@ -694,6 +830,9 @@ function fieldWire(field: UiField): DesignFieldWire {
     typeof value === "string" || typeof value === "number" || typeof value === "boolean"
       ? [{ label: String(value), value }]
       : []);
+  if (options.length > DESIGN_WIRE_LIMITS.maxOptions) {
+    throw new DesignError("SCHEMA_INVALID", "The model schema field has too many options");
+  }
   const isEnum = options.length > 0;
   const kind = isEnum
     ? "enum" as const
@@ -762,7 +901,11 @@ function pointerValue(root: Readonly<Record<string, JsonValue>>, pointer: string
   return current as JsonValue | undefined;
 }
 
-function taskWire(task: DesignTaskRecord, now: number): DesignSnapshotWire["jobs"][number] {
+function taskWire(
+  task: DesignTaskRecord,
+  now: number,
+  currentCredentialEpoch: number | null,
+): DesignSnapshotWire["jobs"][number] {
   const resources = task.resources.flatMap((resource, index) => {
     const expiresAt = resource.expiresAt ?? task.expiresAt ??
       (task.completedAt ?? task.updatedAt) + DEFAULT_RESULT_TTL_MS;
@@ -776,6 +919,37 @@ function taskWire(task: DesignTaskRecord, now: number): DesignSnapshotWire["jobs
     }];
   });
   const status = designStatus(task, resources.length, task.resources.length, now);
+  const credentialMismatch = status === "running" && task.taskId !== null &&
+    (task.credentialEpoch === null || currentCredentialEpoch === null ||
+      task.credentialEpoch !== currentCredentialEpoch);
+  let diagnostic: DesignSnapshotWire["jobs"][number]["diagnostic"] = null;
+  if (task.pollDiagnostic !== null) {
+    diagnostic = pollDiagnosticWire(task.pollDiagnostic, task.pollBlocked);
+  } else if (credentialMismatch) {
+    diagnostic = {
+      code: "credential-changed",
+      message: "This generation belongs to an earlier credential and cannot be refreshed.",
+      retryable: false,
+    };
+  } else if (status === "submit-unknown") {
+    diagnostic = {
+      code: "submit-unknown",
+      message: "The generation outcome is unknown.",
+      retryable: false,
+    };
+  } else if (status === "failed") {
+    diagnostic = {
+      code: "generation-failed",
+      message: "The generation was not completed.",
+      retryable: false,
+    };
+  } else if (status === "succeeded" && resources.length === 0) {
+    diagnostic = {
+      code: "result-unavailable",
+      message: "The generation completed without a usable output resource.",
+      retryable: false,
+    };
+  }
   return {
     jobId: task.taskId ?? task.requestId,
     modelId: task.modelSlug,
@@ -783,14 +957,70 @@ function taskWire(task: DesignTaskRecord, now: number): DesignSnapshotWire["jobs
     createdAt: new Date(task.createdAt).toISOString(),
     updatedAt: new Date(task.updatedAt).toISOString(),
     resources,
-    diagnostic: status === "submit-unknown"
-      ? { code: "submit-unknown", message: "The generation outcome is unknown.", retryable: false }
-      : status === "failed"
-        ? { code: "generation-failed", message: "The generation was not completed.", retryable: false }
-        : status === "succeeded" && resources.length === 0
-          ? { code: "result-unavailable", message: "The generation completed without a usable output resource.", retryable: false }
-        : null,
+    diagnostic,
   };
+}
+
+function circularSlice<T>(items: readonly T[], start: number, limit: number): readonly T[] {
+  if (items.length === 0) return [];
+  const count = Math.min(items.length, limit);
+  return Array.from({ length: count }, (_, offset) => items[(start + offset) % items.length] as T);
+}
+
+function classifyPollFailure(
+  error: unknown,
+  attempt: number,
+  now: number,
+): {
+  readonly attempt: number;
+  readonly nextPollAt: number;
+  readonly blocked: boolean;
+  readonly code: DesignPollDiagnosticCode;
+} {
+  const status = error instanceof DesignError ? error.status : null;
+  if (status === 401) {
+    return { attempt, nextPollAt: now, blocked: true, code: "credential-rejected" };
+  }
+  if (status === 403 || status === 404) {
+    return { attempt, nextPollAt: now, blocked: true, code: "task-inaccessible" };
+  }
+  if (error instanceof DesignError && error.code === "UNEXPECTED_RESPONSE") {
+    const blocked = attempt >= 3;
+    return {
+      attempt,
+      nextPollAt: blocked ? now : now + pollBackoff(attempt),
+      blocked,
+      code: "response-invalid",
+    };
+  }
+  const code: DesignPollDiagnosticCode = status === 429 ? "rate-limited" : "poll-unavailable";
+  const delay = Math.max(
+    error instanceof DesignError ? error.retryAfterMs ?? 0 : 0,
+    pollBackoff(attempt),
+  );
+  return { attempt, nextPollAt: now + delay, blocked: false, code };
+}
+
+function pollBackoff(attempt: number): number {
+  return Math.min(5 * 60_000, 5_000 * 2 ** Math.min(6, Math.max(0, attempt - 1)));
+}
+
+function pollDiagnosticWire(
+  code: DesignPollDiagnosticCode,
+  blocked: boolean,
+): NonNullable<DesignSnapshotWire["jobs"][number]["diagnostic"]> {
+  switch (code) {
+    case "credential-rejected":
+      return { code, message: "The Modellix credential was rejected while refreshing this task.", retryable: false };
+    case "task-inaccessible":
+      return { code, message: "This generation task is no longer accessible.", retryable: false };
+    case "rate-limited":
+      return { code, message: "Task refresh is rate limited and will resume later.", retryable: true };
+    case "response-invalid":
+      return { code, message: "The task response could not be understood.", retryable: !blocked };
+    case "poll-unavailable":
+      return { code, message: "Task refresh is temporarily unavailable and will resume later.", retryable: true };
+  }
 }
 
 function designStatus(
@@ -851,20 +1081,6 @@ function chooseDefaultModel(
   return available.find((model) => model.kind === "image")?.id ?? available[0]?.id ?? null;
 }
 
-function chooseDefaultModelFromSummaries(
-  models: readonly DesignModelSummary[],
-  lastModel: string | null,
-): string | null {
-  if (lastModel !== null && models.some((model) => model.slug === lastModel)) {
-    return lastModel;
-  }
-  for (const modelId of PREFERRED_DEFAULT_MODELS) {
-    if (models.some((model) => model.slug === modelId)) return modelId;
-  }
-  return models.find((model) => model.categories.includes("image"))?.slug ??
-    models[0]?.slug ?? null;
-}
-
 function splitModel(modelId: string): [string, string] {
   safeModelId(modelId);
   const [provider, model] = modelId.split("/");
@@ -908,4 +1124,16 @@ function record(value: unknown): Record<string, unknown> {
 
 function jsonEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function jsonFingerprint(value: JsonValue): string {
+  return createHash("sha256").update(stableJson(value), "utf8").digest("hex");
+}
+
+function stableJson(value: JsonValue): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const object = value as Readonly<Record<string, JsonValue>>;
+  return `{${Object.keys(object).sort().map((key) =>
+    `${JSON.stringify(key)}:${stableJson(object[key] as JsonValue)}`).join(",")}}`;
 }

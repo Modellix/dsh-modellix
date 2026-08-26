@@ -6,6 +6,7 @@ import type {
   PredictionTask,
   PredictionTaskStatus,
 } from "./prediction-client.js";
+import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
 
 export const DEFAULT_RESULT_TTL_MS = 7 * 24 * 60 * 60_000;
 export const DEFAULT_DESIGN_WAL_KEY = "modellix.design.task-wal.v1";
@@ -18,6 +19,8 @@ export type DesignTaskState =
 export interface DesignTaskRecord {
   readonly requestId: string;
   readonly modelSlug: string;
+  /** Credential generation that created the remote task; null only for legacy v1 records. */
+  readonly credentialEpoch: number | null;
   readonly taskId: string | null;
   readonly state: DesignTaskState;
   readonly createdAt: number;
@@ -25,7 +28,18 @@ export interface DesignTaskRecord {
   readonly completedAt: number | null;
   readonly expiresAt: number | null;
   readonly resources: readonly PredictionResource[];
+  readonly pollAttempt: number;
+  readonly nextPollAt: number;
+  readonly pollBlocked: boolean;
+  readonly pollDiagnostic: DesignPollDiagnosticCode | null;
 }
+
+export type DesignPollDiagnosticCode =
+  | "credential-rejected"
+  | "task-inaccessible"
+  | "rate-limited"
+  | "poll-unavailable"
+  | "response-invalid";
 
 export interface AvailableDesignResult {
   readonly requestId: string;
@@ -45,6 +59,8 @@ export type DesignWalEvent =
       readonly timestamp: number;
       readonly requestId: string;
       readonly modelSlug: string;
+      /** Optional only so pre-0.1.0 WAL documents fail safe instead of becoming unreadable. */
+      readonly credentialEpoch?: number;
     }
   | {
       readonly type: "submit-unknown";
@@ -70,7 +86,20 @@ export type DesignWalEvent =
       readonly sequence: number;
       readonly timestamp: number;
       readonly task: PredictionTask;
+    }
+  | {
+      readonly type: "task-poll-failed";
+      readonly sequence: number;
+      readonly timestamp: number;
+      readonly taskId: string;
+      readonly attempt: number;
+      readonly nextPollAt: number;
+      readonly blocked: boolean;
+      readonly code: DesignPollDiagnosticCode;
     };
+
+type WithoutSequence<T> = T extends unknown ? Omit<T, "sequence"> : never;
+type UnsequencedDesignWalEvent = WithoutSequence<DesignWalEvent>;
 
 interface DesignWalDocument {
   readonly version: 1;
@@ -120,9 +149,14 @@ export class DesignTaskRepository {
     );
   }
 
-  async recordSubmitIntent(requestId: string, modelSlug: string): Promise<void> {
+  async recordSubmitIntent(
+    requestId: string,
+    modelSlug: string,
+    credentialEpoch: number,
+  ): Promise<void> {
     requireId(requestId, "requestId");
     requireModelSlug(modelSlug);
+    requireEpoch(credentialEpoch);
     const wal = await this.#loadWal();
     const records = replayDesignWal(wal.events);
     if (records.some((record) => record.requestId === requestId)) {
@@ -134,6 +168,7 @@ export class DesignTaskRepository {
       timestamp: this.#clock.now(),
       requestId,
       modelSlug,
+      credentialEpoch,
     });
   }
 
@@ -187,7 +222,14 @@ export class DesignTaskRepository {
     const record = replayDesignWal(wal.events).find(
       (candidate) => candidate.requestId === requestId,
     );
-    if (record === undefined || (record.state !== "submitting" && record.state !== "submit-unknown")) {
+    if (record?.taskId === task.taskId) {
+      // A storage provider may durably commit and still surface an uncertain
+      // completion. Retrying this local write must therefore be idempotent;
+      // the paid POST itself is never repeated.
+      return;
+    }
+    if (record === undefined || record.taskId !== null ||
+      (record.state !== "submitting" && record.state !== "submit-unknown")) {
       throw new DesignError(
         "STORAGE_INVALID",
         "An accepted task requires an existing unresolved submit intent",
@@ -214,11 +256,47 @@ export class DesignTaskRepository {
         "Observed task is not associated with a Design submission",
       );
     }
+    if (sameTaskObservation(record, task) && record.pollDiagnostic === null) return;
     await this.#append(wal, {
       type: "task-observed",
       sequence: nextSequence(wal),
       timestamp: this.#clock.now(),
       task: cloneTask(task),
+    });
+  }
+
+  async recordPollFailure(
+    taskId: string,
+    failure: {
+      readonly attempt: number;
+      readonly nextPollAt: number;
+      readonly blocked: boolean;
+      readonly code: DesignPollDiagnosticCode;
+    },
+  ): Promise<void> {
+    requireId(taskId, "taskId");
+    requirePollAttempt(failure.attempt);
+    if (!validTimestamp(failure.nextPollAt)) {
+      throw new DesignError("INVALID_ARGUMENT", "nextPollAt must be a non-negative timestamp");
+    }
+    if (typeof failure.blocked !== "boolean") {
+      throw new DesignError("INVALID_ARGUMENT", "blocked must be boolean");
+    }
+    requirePollDiagnostic(failure.code);
+    const wal = await this.#loadWal();
+    const record = replayDesignWal(wal.events).find((candidate) => candidate.taskId === taskId);
+    if (record === undefined || !["queued", "running", "unknown"].includes(record.state)) {
+      throw new DesignError("STORAGE_INVALID", "Only an active task can record a poll failure");
+    }
+    await this.#append(wal, {
+      type: "task-poll-failed",
+      sequence: nextSequence(wal),
+      timestamp: this.#clock.now(),
+      taskId,
+      attempt: failure.attempt,
+      nextPollAt: failure.nextPollAt,
+      blocked: failure.blocked,
+      code: failure.code,
     });
   }
 
@@ -236,18 +314,21 @@ export class DesignTaskRepository {
     wal: DesignWalDocument,
     event: DesignWalEvent,
   ): Promise<void> {
-    const next: DesignWalDocument = {
+    let next: DesignWalDocument = {
       version: 1,
       events: [...wal.events, event],
     };
-    if (next.events.length > this.#maxEvents) {
-      throw new DesignError("STORAGE_INVALID", "Design WAL event limit was reached");
+    if (!walFits(next, this.#maxEvents, this.#maxBytes)) {
+      const checkpoint = checkpointRecords(
+        replayDesignWal(next.events),
+        this.#clock.now(),
+      );
+      next = { version: 1, events: checkpoint };
+      if (!walFits(next, this.#maxEvents, this.#maxBytes)) {
+        throw new DesignError("STORAGE_INVALID", "Design WAL capacity was reached");
+      }
     }
-    const serialized = JSON.stringify(next);
-    if (new TextEncoder().encode(serialized).byteLength > this.#maxBytes) {
-      throw new DesignError("STORAGE_INVALID", "Design WAL size limit was reached");
-    }
-    await this.#storage.write(this.#key, serialized);
+    await this.#storage.write(this.#key, JSON.stringify(next));
   }
 
   async #loadWal(): Promise<DesignWalDocument> {
@@ -301,12 +382,14 @@ export function replayDesignWal(
       case "submit-intent": {
         requireId(event.requestId, "requestId");
         requireModelSlug(event.modelSlug);
+        if (event.credentialEpoch !== undefined) requireEpoch(event.credentialEpoch);
         if (records.has(event.requestId)) {
           throw new DesignError("STORAGE_INVALID", "Design WAL has a duplicate requestId");
         }
         records.set(event.requestId, {
           requestId: event.requestId,
           modelSlug: event.modelSlug,
+          credentialEpoch: event.credentialEpoch ?? null,
           taskId: null,
           state: "submitting",
           createdAt: event.timestamp,
@@ -314,6 +397,10 @@ export function replayDesignWal(
           completedAt: null,
           expiresAt: null,
           resources: [],
+          pollAttempt: 0,
+          nextPollAt: 0,
+          pollBlocked: false,
+          pollDiagnostic: null,
         });
         break;
       }
@@ -366,6 +453,36 @@ export function replayDesignWal(
         records.set(requestId, mergeTask(current, event.task, event.timestamp));
         break;
       }
+      case "task-poll-failed": {
+        requireId(event.taskId, "taskId");
+        requirePollAttempt(event.attempt);
+        requirePollDiagnostic(event.code);
+        if (!validTimestamp(event.nextPollAt)) {
+          throw new DesignError("STORAGE_INVALID", "Design poll retry timestamp is invalid");
+        }
+        if (typeof event.blocked !== "boolean") {
+          throw new DesignError("STORAGE_INVALID", "Design poll blocked state is invalid");
+        }
+        const requestId = taskToRequest.get(event.taskId);
+        if (requestId === undefined) {
+          throw new DesignError("STORAGE_INVALID", "Poll failure has no accepted submission");
+        }
+        const current = requireRecord(records, requestId);
+        if (!["queued", "running", "unknown"].includes(current.state)) {
+          throw new DesignError("STORAGE_INVALID", "Poll failure references a terminal task");
+        }
+        records.set(requestId, {
+          ...current,
+          updatedAt: event.timestamp,
+          pollAttempt: event.attempt,
+          nextPollAt: event.nextPollAt,
+          pollBlocked: event.blocked,
+          pollDiagnostic: event.code,
+        });
+        break;
+      }
+      default:
+        throw new DesignError("STORAGE_INVALID", "Design WAL event type is invalid");
     }
   }
   return [...records.values()].sort((left, right) => right.createdAt - left.createdAt);
@@ -422,7 +539,98 @@ function mergeTask(
     completedAt: task.completedAt,
     expiresAt: task.expiresAt,
     resources: task.resources.map(cloneResource),
+    pollAttempt: 0,
+    nextPollAt: 0,
+    pollBlocked: false,
+    pollDiagnostic: null,
   };
+}
+
+function sameTaskObservation(record: DesignTaskRecord, task: PredictionTask): boolean {
+  return record.taskId === task.taskId && record.state === task.status &&
+    record.completedAt === task.completedAt && record.expiresAt === task.expiresAt &&
+    JSON.stringify(record.resources) === JSON.stringify(task.resources);
+}
+
+function walFits(
+  wal: DesignWalDocument,
+  maxEvents: number,
+  maxBytes: number,
+): boolean {
+  return wal.events.length <= maxEvents &&
+    new TextEncoder().encode(JSON.stringify(wal)).byteLength <= maxBytes;
+}
+
+/** Collapse history to the minimum replayable state and drop expired terminal records. */
+function checkpointRecords(
+  records: readonly DesignTaskRecord[],
+  now: number,
+): readonly DesignWalEvent[] {
+  const retained = records
+    .filter((record) => shouldRetainCheckpoint(record, now))
+    .sort((left, right) => left.createdAt - right.createdAt);
+  const events: DesignWalEvent[] = [];
+  const append = (event: UnsequencedDesignWalEvent): void => {
+    events.push({ ...event, sequence: events.length + 1 } as DesignWalEvent);
+  };
+  for (const record of retained) {
+    append({
+      type: "submit-intent",
+      timestamp: record.createdAt,
+      requestId: record.requestId,
+      modelSlug: record.modelSlug,
+      ...(record.credentialEpoch === null ? {} : { credentialEpoch: record.credentialEpoch }),
+    });
+    if (record.taskId !== null) {
+      append({
+        type: "submit-accepted",
+        timestamp: record.updatedAt,
+        requestId: record.requestId,
+        task: {
+          taskId: record.taskId,
+          status: record.state as PredictionTaskStatus,
+          resources: record.resources.map(cloneResource),
+          createdAt: null,
+          completedAt: record.completedAt,
+          expiresAt: record.expiresAt,
+        },
+      });
+      if (record.pollDiagnostic !== null) {
+        append({
+          type: "task-poll-failed",
+          timestamp: record.updatedAt,
+          taskId: record.taskId,
+          attempt: record.pollAttempt,
+          nextPollAt: record.nextPollAt,
+          blocked: record.pollBlocked,
+          code: record.pollDiagnostic,
+        });
+      }
+    } else if (record.state === "submit-unknown") {
+      append({
+        type: "submit-unknown",
+        timestamp: record.updatedAt,
+        requestId: record.requestId,
+      });
+    } else if (record.state === "failed") {
+      append({
+        type: "submit-rejected",
+        timestamp: record.updatedAt,
+        requestId: record.requestId,
+      });
+    }
+  }
+  return events;
+}
+
+function shouldRetainCheckpoint(record: DesignTaskRecord, now: number): boolean {
+  if (["submitting", "submit-unknown", "queued", "running", "unknown"].includes(record.state)) {
+    return true;
+  }
+  if (record.state === "succeeded") {
+    return selectAvailableResults([record], now).length > 0;
+  }
+  return record.updatedAt + DEFAULT_RESULT_TTL_MS > now;
 }
 
 function parseWal(value: unknown, maxEvents: number): DesignWalDocument {
@@ -460,6 +668,9 @@ function validateTask(task: PredictionTask): void {
   if (!["queued", "running", "succeeded", "failed", "canceled", "unknown"].includes(task.status)) {
     throw new DesignError("STORAGE_INVALID", "Prediction task status is invalid");
   }
+  if (task.resources.length > DESIGN_WIRE_LIMITS.maxResources) {
+    throw new DesignError("STORAGE_INVALID", "Prediction task has too many resources");
+  }
   task.resources.forEach((resource) => {
     if (
       !["image", "video", "audio"].includes(resource.kind) ||
@@ -491,6 +702,30 @@ function requireId(value: string, field: string): void {
 function requireModelSlug(value: string): void {
   if (!MODEL_SLUG.test(value)) {
     throw new DesignError("INVALID_ARGUMENT", "modelSlug must use provider/model form");
+  }
+}
+
+function requireEpoch(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new DesignError("INVALID_ARGUMENT", "credentialEpoch must be a non-negative safe integer");
+  }
+}
+
+function requirePollAttempt(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+    throw new DesignError("INVALID_ARGUMENT", "poll attempt is invalid");
+  }
+}
+
+function requirePollDiagnostic(value: string): asserts value is DesignPollDiagnosticCode {
+  if (![
+    "credential-rejected",
+    "task-inaccessible",
+    "rate-limited",
+    "poll-unavailable",
+    "response-invalid",
+  ].includes(value)) {
+    throw new DesignError("STORAGE_INVALID", "poll diagnostic is invalid");
   }
 }
 

@@ -2,6 +2,7 @@ import {
   CredentialMutationCoordinator,
   MODELLIX_CREDENTIAL_REF,
   parseRetryAfter,
+  readBoundedResponseJson,
   toModellixError,
   type CredentialDescriptor,
   type CredentialMutationResult,
@@ -124,7 +125,20 @@ export class CredentialBroker {
           retryAfterMs: parseRetryAfter(response.headers.get("retry-after"), this.#now()),
         }));
     }
-    const value = await readBoundedJson(response);
+    let value: unknown;
+    try {
+      value = await readBoundedResponseJson(
+        response,
+        MAX_VALIDATION_RESPONSE_BYTES,
+        signal,
+      );
+    } catch (error) {
+      throw validationError(
+        signal?.aborted === true || isAbortError(error)
+          ? "abort"
+          : "unexpected-response",
+      );
+    }
     if (!isRecord(value) || !isRecord(value.data) || value.data.is_valid !== true) {
       throw validationError(value !== null && isRecord(value) && isRecord(value.data)
         && value.data.is_valid === false ? "candidate-invalid" : "unexpected-response");
@@ -150,22 +164,6 @@ export class CredentialBroker {
 function assertCandidate(value: string): void {
   if (typeof value !== "string" || value.length === 0 || value.length > 4096 || hasControlCharacters(value)) {
     throw validationError("candidate-invalid");
-  }
-}
-
-async function readBoundedJson(response: Response): Promise<unknown> {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > MAX_VALIDATION_RESPONSE_BYTES) {
-    throw validationError("unexpected-response");
-  }
-  const text = await response.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_VALIDATION_RESPONSE_BYTES) {
-    throw validationError("unexpected-response");
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw validationError("unexpected-response");
   }
 }
 

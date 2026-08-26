@@ -224,6 +224,30 @@ describe("parseDesignSchema", () => {
       ),
     ).toThrowError(DesignError);
   });
+
+  it.each(["__proto__", "constructor", "prototype"])(
+    "rejects unsafe property name %s before it enters the Schema IR",
+    (propertyName) => {
+      const ir = parseDesignSchema({
+        type: "object",
+        properties: Object.fromEntries([
+          [propertyName, {
+            type: "object",
+            properties: { prompt: { type: "string" } },
+          }],
+        ]),
+      });
+
+      expect(ir.supported).toBe(false);
+      expect(ir.fields).toEqual([]);
+      expect(ir.diagnostics).toContainEqual(expect.objectContaining({
+        code: "INVALID_KEYWORD",
+        keyword: "properties",
+        blocking: true,
+        message: expect.stringContaining("unsafe"),
+      }));
+    },
+  );
 });
 
 function operationWith(schema: unknown): Record<string, unknown> {

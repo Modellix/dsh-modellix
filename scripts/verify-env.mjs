@@ -12,19 +12,23 @@ const expected = Object.freeze({
 
 const harnessPeers = Object.freeze([
   '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/dsh-anonymous-user-id',
   '@deepseek-ai/dsh-client-connection',
   '@deepseek-ai/dsh-client-locale',
   '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-input-trigger',
+  '@deepseek-ai/dsh-client-ui-layout',
   '@deepseek-ai/dsh-client-ui-settings',
   '@deepseek-ai/dsh-client-ui-tool',
   '@deepseek-ai/dsh-credentials',
+  '@deepseek-ai/dsh-host-apiproxy',
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-llm-pi-ai',
   '@deepseek-ai/dsh-settings',
   '@deepseek-ai/dsh-storage',
+  '@deepseek-ai/dsh-storage-domain',
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-web',
 ])
@@ -87,6 +91,12 @@ assertVersion('devDependencies.@deepseek-ai/cordis', packageJson.devDependencies
 for (const name of harnessPeers) {
   assertVersion(`peerDependencies.${name}`, packageJson.peerDependencies?.[name], expected.dsh)
   assertVersion(`devDependencies.${name}`, packageJson.devDependencies?.[name], expected.dsh)
+}
+
+const uncheckedHarnessPeers = Object.keys(packageJson.peerDependencies ?? {})
+  .filter(name => name.startsWith('@deepseek-ai/dsh-') && !harnessPeers.includes(name))
+if (uncheckedHarnessPeers.length > 0) {
+  fail(`runtime DSH peers must be added to fixed verification: ${uncheckedHarnessPeers.join(', ')}`)
 }
 
 for (const name of authoringOnly) {

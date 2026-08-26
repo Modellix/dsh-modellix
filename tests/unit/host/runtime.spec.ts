@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   MODELLIX_CREDENTIAL_REF,
+  beginLlmMaterialization,
   createDefaultConfig,
   migrateConfig,
   type PluginConfig,
@@ -50,6 +51,22 @@ describe("ModellixRuntime Host contracts", () => {
       llm: { health: "disabled", modelCount: 0, refreshedAt: null },
     });
     expect(JSON.stringify(state)).not.toContain("apiKey");
+
+    await harness.dispose();
+  });
+
+  it("returns Design failures as safe business envelopes", async () => {
+    const harness = new RuntimeHarness({ config: configWith({ llm: false }) });
+    installFetch(rejectUnexpectedFetch);
+    await ModellixRuntime.create(harness.context);
+
+    const result = await harness.rpcValue<unknown>("design/unsupported", { version: 1 });
+    expect(result).toEqual({
+      version: 1,
+      accepted: false,
+      error: { code: "MODELLIX_DESIGN_INPUT_INVALID" },
+    });
+    expect(JSON.stringify(result)).not.toContain("Unknown Design endpoint");
 
     await harness.dispose();
   });
@@ -180,6 +197,11 @@ describe("ModellixRuntime Host contracts", () => {
     });
     expect(harness.settings.config.llmOwnership.route.ownership).toBe("created");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(harness.settings.runtimeMutations.slice(0, 3)).toEqual([
+      "modellix",
+      "llm-pi-ai",
+      "modellix",
+    ]);
 
     harness.settings.pushExternalConfig(configWith({
       llm: false,
@@ -195,6 +217,210 @@ describe("ModellixRuntime Host contracts", () => {
     await harness.dispose();
   });
 
+  it("does not enter ready until every catalog model resolves through ctx.llm", async () => {
+    const harness = new RuntimeHarness({
+      config: configWith({ llm: true, credentialEpoch: 6 }),
+      credential: "configured-unit-test-key",
+    });
+    const registryGate = harness.llm.blockNextResolution();
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    await registryGate.started;
+    expect((await harness.state()).llm.health).not.toBe("ready");
+    expect(harness.settings.llmRoute).toMatchObject({ models: [MODEL] });
+    expect(harness.settings.config.llmOwnership.route.ownership).toBe("none");
+
+    registryGate.release();
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm).toMatchObject({ health: "ready", modelCount: 1 });
+    });
+    expect(harness.llm.resolveCalls).toBe(1);
+    expect(harness.settings.config.llmOwnership.route.ownership).toBe("created");
+
+    await harness.dispose();
+  });
+
+  it("rolls back materialized Settings when the public LLM registry cannot resolve the model", async () => {
+    const harness = new RuntimeHarness({
+      config: configWith({ llm: true, credentialEpoch: 7 }),
+      credential: "configured-unit-test-key",
+    });
+    harness.llm.rejectExactModels = true;
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm.health).toBe("error");
+      expect(harness.settings.llmRoute).toBeUndefined();
+    });
+    expect(harness.llm.resolveCalls).toBeGreaterThan(1);
+    expect(harness.settings.config.llmOwnership.route.ownership).toBe("none");
+    expect(harness.loggerErrors).toEqual([]);
+
+    await harness.dispose();
+  });
+
+  it("restores the exact pre-materialization route when the ownership ledger write fails", async () => {
+    const secret = "unit-test-credential-must-not-escape";
+    const previousRoute = {
+      models: [{ id: "user/manual-model", label: "Preserve me" }],
+      userHeaderPolicy: "preserve",
+    };
+    const harness = new RuntimeHarness({
+      config: configWith({ llm: true, credentialEpoch: 11 }),
+      credential: secret,
+      llmRoute: previousRoute,
+    });
+    harness.settings.failConfigMutationOnAttempt = 2;
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm.health).toBe("error");
+    });
+    const state = await harness.state();
+    expect(harness.settings.llmRoute).toEqual(previousRoute);
+    expect(harness.settings.config.llmOwnership.route.ownership).toBe("none");
+    expect(harness.settings.runtimeMutations.filter((namespace) => namespace === "llm-pi-ai"))
+      .toHaveLength(2);
+    expect(harness.loggerErrors).toEqual([]);
+    expect(JSON.stringify({
+      state,
+      config: harness.settings.config,
+      route: harness.settings.llmRoute,
+      mutations: harness.settings.runtimeMutations,
+      logs: harness.loggerErrors,
+    })).not.toContain(secret);
+
+    await harness.dispose();
+  });
+
+  it("stays non-ready and emits only a fixed diagnostic when ledger write and rollback both fail", async () => {
+    const secret = "unit-test-double-failure-credential";
+    const harness = new RuntimeHarness({
+      config: configWith({ llm: true, credentialEpoch: 12 }),
+      credential: secret,
+    });
+    harness.settings.failConfigMutationOnAttempt = 2;
+    harness.settings.failLlmMutationOnAttempt = 2;
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm.health).toBe("error");
+      expect(harness.loggerErrors).toHaveLength(1);
+    });
+    const state = await harness.state();
+    expect(state.llm.health).not.toBe("ready");
+    expect(harness.settings.llmRoute).toMatchObject({ models: [MODEL] });
+    expect(harness.settings.config.llmOwnership.route.ownership).toBe("none");
+    expect(harness.loggerErrors).toEqual([[
+      "MODELLIX_LLM_OWNERSHIP_ROLLBACK_FAILED: failed to restore the previous LLM settings snapshot",
+    ]]);
+    expect(JSON.stringify({
+      state,
+      config: harness.settings.config,
+      route: harness.settings.llmRoute,
+      mutations: harness.settings.runtimeMutations,
+      logs: harness.loggerErrors,
+    })).not.toContain(secret);
+
+    await harness.dispose();
+  });
+
+  it("recovers a crash after route write without claiming the uncommitted route or user drift", async () => {
+    const secret = "unit-test-crash-recovery-credential";
+    const planned = planLlmRouteMaterialization(undefined, [MODEL], EMPTY_LLM_ROUTE_LEDGER);
+    const interrupted = beginLlmMaterialization(
+      configWith({ llm: true, credentialEpoch: 13 }),
+      {
+        operationId: "llm_interrupted_materialization_13",
+        startedAt: 13_000,
+        expectedLlmSettingsRevision: 0,
+      },
+    );
+    const userRoute = {
+      ...planned.route,
+      userHeaderPolicy: "keep-me",
+      models: [{ ...MODEL, name: "User-chosen label" }],
+    };
+    const harness = new RuntimeHarness({
+      config: interrupted,
+      credential: secret,
+      llmRoute: userRoute,
+    });
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm.health).toBe("ready");
+    });
+    const state = await harness.state();
+    expect(harness.settings.config.llmOwnership.materializationRecovery).toBeNull();
+    expect(harness.settings.config.llmOwnership.route).toMatchObject({
+      ownership: "adopted",
+      entries: [],
+    });
+    expect(harness.settings.llmRoute).toEqual(userRoute);
+    expect(harness.loggerWarnings).toEqual([[
+      "MODELLIX_LLM_MATERIALIZATION_RECOVERED: pending ownership was reconciled conservatively",
+    ]]);
+    expect(JSON.stringify({
+      state,
+      config: harness.settings.config,
+      route: harness.settings.llmRoute,
+      warnings: harness.loggerWarnings,
+      errors: harness.loggerErrors,
+    })).not.toContain(secret);
+
+    await harness.dispose();
+  });
+
+  it("replays safely when the crash happened after the marker but before the route write", async () => {
+    const interrupted = beginLlmMaterialization(
+      configWith({ llm: true, credentialEpoch: 14 }),
+      {
+        operationId: "llm_interrupted_before_route_14",
+        startedAt: 14_000,
+        expectedLlmSettingsRevision: 0,
+      },
+    );
+    const harness = new RuntimeHarness({
+      config: interrupted,
+      credential: "unit-test-before-route-credential",
+    });
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm.health).toBe("ready");
+    });
+    expect(harness.settings.config.llmOwnership.materializationRecovery).toBeNull();
+    expect(harness.settings.config.llmOwnership.route.ownership).toBe("created");
+    expect(harness.settings.llmRoute).toMatchObject({ models: [MODEL] });
+
+    await harness.dispose();
+  });
+
   it("finishes an interrupted remove on restart without replaying the Credential mutation", async () => {
     const planned = planLlmRouteMaterialization(undefined, [MODEL], EMPTY_LLM_ROUTE_LEDGER);
     const interruptedConfig = configWith({
@@ -203,7 +429,10 @@ describe("ModellixRuntime Host contracts", () => {
       onboarding: "completed",
       base: {
         ...createDefaultConfig(),
-        llmOwnership: { route: planned.ledger },
+        llmOwnership: {
+          ...createDefaultConfig().llmOwnership,
+          route: planned.ledger,
+        },
       },
     });
     const harness = new RuntimeHarness({
@@ -335,6 +564,9 @@ type Cleanup = () => void | Promise<void>;
 class RuntimeHarness {
   readonly settings: FakeSettings;
   readonly credentials: FakeCredentials;
+  readonly llm: FakeLlmRegistry;
+  readonly loggerErrors: unknown[][] = [];
+  readonly loggerWarnings: unknown[][] = [];
   readonly #designValues: Record<string, string> = {};
   #credentialListeners = new Set<CredentialListener>();
   #toolPreExecuteListeners = new Set<(...args: unknown[]) => unknown>();
@@ -349,6 +581,7 @@ class RuntimeHarness {
     readonly llmRoute?: Record<string, unknown>;
   }) {
     this.settings = new FakeSettings(options.config, options.llmRoute);
+    this.llm = new FakeLlmRegistry(this.settings);
     this.credentials = new FakeCredentials(
       options.credential,
       (ref) => this.emitCredential(ref),
@@ -409,6 +642,7 @@ class RuntimeHarness {
     const context = {
       settings: this.settings.service,
       credentials: this.credentials.service,
+      llm: this.llm.service,
       web: {
         registerSearchProvider: () => () => undefined,
         registerFetchProvider: () => () => undefined,
@@ -483,8 +717,12 @@ class RuntimeHarness {
         throw new Error(`Unexpected event registration: ${event}`);
       },
       logger: {
-        warn: () => undefined,
-        error: () => undefined,
+        warn: (...args: unknown[]) => {
+          this.loggerWarnings.push(args);
+        },
+        error: (...args: unknown[]) => {
+          this.loggerErrors.push(args);
+        },
         info: () => undefined,
       },
     };
@@ -553,7 +791,11 @@ interface FakeWatcher {
 
 class FakeSettings {
   config: PluginConfig;
+  failConfigMutationOnAttempt: number | undefined;
+  configMutationAttempts = 0;
   failNextLlmMutation = false;
+  failLlmMutationOnAttempt: number | undefined;
+  llmMutationAttempts = 0;
   readonly runtimeMutations: string[] = [];
   readonly #watchers = new Set<FakeWatcher>();
   #configRevision = 0;
@@ -664,6 +906,10 @@ class FakeSettings {
   ): Promise<void> {
     this.runtimeMutations.push(namespace);
     if (namespace === "modellix") {
+      this.configMutationAttempts += 1;
+      if (this.failConfigMutationOnAttempt === this.configMutationAttempts) {
+        throw new Error("simulated ownership ledger Settings interruption");
+      }
       if (expectedRevision !== undefined && expectedRevision !== this.#configRevision) {
         throw new SettingsConflictError(
           settingsNamespace("modellix"),
@@ -680,9 +926,13 @@ class FakeSettings {
       return;
     }
     if (namespace !== "llm-pi-ai") throw new Error(`Unexpected Settings namespace: ${namespace}`);
+    this.llmMutationAttempts += 1;
     if (this.failNextLlmMutation) {
       this.failNextLlmMutation = false;
       throw new Error("simulated independent LLM Settings interruption");
+    }
+    if (this.failLlmMutationOnAttempt === this.llmMutationAttempts) {
+      throw new Error("simulated LLM Settings rollback interruption");
     }
     if (expectedRevision !== undefined && expectedRevision !== this.#llmRevision) {
       throw new SettingsConflictError(
@@ -715,6 +965,66 @@ class FakeSettings {
         .catch(() => undefined);
       watcher.tail = segment;
     }
+  }
+}
+
+class FakeLlmRegistry {
+  rejectExactModels = false;
+  resolveCalls = 0;
+  readonly #settings: FakeSettings;
+  #resolutionBlocker: {
+    readonly started: () => void;
+    readonly wait: Promise<void>;
+  } | undefined;
+
+  constructor(settings: FakeSettings) {
+    this.#settings = settings;
+  }
+
+  get service(): Context["llm"] {
+    return {
+      listProviders: () => this.#settings.llmRoute === undefined
+        ? []
+        : [{ id: "modellix", name: "Modellix" }],
+      resolveModelInfo: async (provider: string, model: string, signal?: AbortSignal) => {
+        this.resolveCalls += 1;
+        const blocker = this.#resolutionBlocker;
+        this.#resolutionBlocker = undefined;
+        if (blocker !== undefined) {
+          blocker.started();
+          await blocker.wait;
+        }
+        signal?.throwIfAborted();
+        if (this.rejectExactModels) throw new Error("simulated exact-model registry miss");
+        if (provider !== "modellix") throw new Error("simulated provider registry miss");
+        const route = this.#settings.llmRoute;
+        const models = route?.models;
+        const entry = Array.isArray(models)
+          ? models.find((candidate) => asRecord(candidate)?.id === model)
+          : undefined;
+        const record = asRecord(entry);
+        if (record === undefined) throw new Error("simulated exact-model registry miss");
+        return {
+          provider,
+          id: model,
+          name: typeof record.name === "string" ? record.name : model,
+        };
+      },
+    } as unknown as Context["llm"];
+  }
+
+  blockNextResolution(): { readonly started: Promise<void>; readonly release: () => void } {
+    if (this.#resolutionBlocker !== undefined) throw new Error("An LLM registry lookup is already blocked");
+    let signalStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#resolutionBlocker = { started: signalStarted, wait };
+    return { started, release };
   }
 }
 
