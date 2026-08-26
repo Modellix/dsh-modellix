@@ -228,26 +228,24 @@ export class LlmSettingsMaterializer {
   ): Promise<LlmRouteLedger> {
     const descriptor = await this.#describeReady();
     if (descriptor === undefined) throw new Error("llm-pi-ai settings namespace is unavailable");
-    const effective = requireRecord(descriptor.value, "settings effective section");
-    const effectiveProviders = effective.providers === undefined
-      ? {}
-      : requireRecord(effective.providers, "effective providers");
     const base = descriptor.base === undefined ? {} : requireRecord(descriptor.base, "settings base section");
     const baseProviders = base.providers === undefined ? {} : requireRecord(base.providers, "base providers");
     const user = descriptor.user === undefined ? {} : requireRecord(descriptor.user, "settings user section");
     const userProviders = user.providers === undefined ? {} : requireRecord(user.providers, "user providers");
-    if (
-      userProviders[MODELLIX_LLM_PROVIDER_ID] === undefined &&
-      baseProviders[MODELLIX_LLM_PROVIDER_ID] !== undefined
-    ) {
+    if (baseProviders[MODELLIX_LLM_PROVIDER_ID] !== undefined) {
       throw new LlmRouteConflictError("composition base ownership");
     }
-    const current = effectiveProviders[MODELLIX_LLM_PROVIDER_ID];
+    // Plan against the raw user layer that this materializer owns and writes.
+    // The resolved value is intentionally unsuitable here: llm-pi-ai's schema
+    // expands nested defaults (for example retry backoff fields), and treating
+    // those inherited values as user-authored drift makes an unchanged route
+    // conflict after every Host restart.
+    const current = userProviders[MODELLIX_LLM_PROVIDER_ID];
     const plan = planLlmRouteMaterialization(current, catalog, ledger);
     const nextLedger = ledger.ownership === "created"
       ? { ...plan.ledger, ownership: "created" as const }
       : plan.ledger;
-    if (plan.changed || userProviders[MODELLIX_LLM_PROVIDER_ID] === undefined) {
+    if (plan.changed) {
       await this.#settings.mutate([{
         op: "set",
         path: ["providers", MODELLIX_LLM_PROVIDER_ID],

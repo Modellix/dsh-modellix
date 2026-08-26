@@ -97,6 +97,36 @@ describe("llm-pi-ai Modellix route materialization", () => {
     })], 17);
   });
 
+  it("ignores schema-expanded effective defaults when the raw owned route is unchanged", async () => {
+    const created = planLlmRouteMaterialization(undefined, catalog);
+    const mutate = vi.fn(async () => undefined);
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => ({
+        revision: 18,
+        value: {
+          providers: {
+            modellix: {
+              ...created.route,
+              retryPolicy: {
+                ...created.route.retryPolicy,
+                retryableCodes: ["RATE_LIMIT", "SERVER"],
+                backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0.1 },
+              },
+            },
+          },
+        },
+        base: { providers: {} },
+        user: { providers: { modellix: created.route } },
+      }),
+      mutate,
+    });
+
+    const ledger = await materializer.materialize(catalog, created.ledger);
+
+    expect(ledger.ownership).toBe("created");
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
   it("refuses to shadow a composition-owned Modellix route", async () => {
     const route = planLlmRouteMaterialization(undefined, catalog).route;
     const materializer = new LlmSettingsMaterializer({
@@ -104,6 +134,22 @@ describe("llm-pi-ai Modellix route materialization", () => {
         revision: 1,
         value: { providers: { modellix: route } },
         base: { providers: { modellix: route } },
+      }),
+      mutate: vi.fn(async () => undefined),
+    });
+
+    await expect(materializer.materialize(catalog, EMPTY_LLM_ROUTE_LEDGER))
+      .rejects.toThrow(/composition base ownership/);
+  });
+
+  it("refuses a user override layered over a composition-owned Modellix route", async () => {
+    const route = planLlmRouteMaterialization(undefined, catalog).route;
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => ({
+        revision: 2,
+        value: { providers: { modellix: route } },
+        base: { providers: { modellix: route } },
+        user: { providers: { modellix: route } },
       }),
       mutate: vi.fn(async () => undefined),
     });
