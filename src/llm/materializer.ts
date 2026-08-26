@@ -3,6 +3,7 @@ import { MODELLIX_CREDENTIAL_REF } from "../core/index.js";
 import type { ModellixLlmModel } from "./catalog.js";
 
 export const MODELLIX_LLM_PROVIDER_ID = "modellix" as const;
+export const MODELLIX_LLM_PROVENANCE_FIELD = "__dshModellixMaterialization" as const;
 
 export interface PiAiModelEntry {
   readonly id: string;
@@ -263,7 +264,21 @@ export interface LlmMaterializationReceipt {
 export interface LlmPreparedMaterialization extends LlmMaterializationReceipt {
   readonly changed: boolean;
   readonly expectedSettingsRevision: number;
+  readonly previousRouteFingerprint: string;
+  readonly targetRouteFingerprint: string;
   apply(): Promise<void>;
+}
+
+export interface LlmInterruptedMaterializationEvidence {
+  readonly previousLedger: LlmRouteLedger;
+  readonly targetLedger: LlmRouteLedger;
+  readonly previousRouteFingerprint: string;
+  readonly provenanceToken: string;
+}
+
+export interface LlmInterruptedMaterializationResult {
+  readonly status: "not-applied" | "applied";
+  readonly ledger: LlmRouteLedger;
 }
 
 export class LlmMaterializationRollbackError extends Error {
@@ -302,6 +317,7 @@ export class LlmSettingsMaterializer {
   async prepareMaterialization(
     catalog: readonly ModellixLlmModel[],
     ledger: LlmRouteLedger,
+    provenanceToken?: string,
   ): Promise<LlmPreparedMaterialization> {
     const descriptor = await this.#describeReady();
     if (descriptor === undefined) throw new Error("llm-pi-ai settings namespace is unavailable");
@@ -309,6 +325,18 @@ export class LlmSettingsMaterializer {
     const baseProviders = base.providers === undefined ? {} : requireRecord(base.providers, "base providers");
     const user = descriptor.user === undefined ? {} : requireRecord(descriptor.user, "settings user section");
     const userProviders = user.providers === undefined ? {} : requireRecord(user.providers, "user providers");
+    const previousProvenance = user[MODELLIX_LLM_PROVENANCE_FIELD];
+    if (provenanceToken !== undefined && !isProvenanceToken(provenanceToken)) {
+      throw new TypeError("provenanceToken must be a bounded non-secret operation identifier");
+    }
+    if (
+      provenanceToken !== undefined &&
+      previousProvenance !== undefined &&
+      (typeof previousProvenance !== "string" ||
+        !isProvenanceToken(previousProvenance))
+    ) {
+      throw new LlmRouteConflictError(MODELLIX_LLM_PROVENANCE_FIELD);
+    }
     if (baseProviders[MODELLIX_LLM_PROVIDER_ID] !== undefined) {
       throw new LlmRouteConflictError("composition base ownership");
     }
@@ -331,14 +359,26 @@ export class LlmSettingsMaterializer {
       ledger: plan.ledger,
       changed: plan.changed,
       expectedSettingsRevision: descriptor.revision,
+      previousRouteFingerprint: previousFingerprint,
+      targetRouteFingerprint: appliedFingerprint,
       apply: async () => {
         if (!plan.changed || applied) return;
         applyAttempted = true;
-        await this.#settings.mutate([{
-          op: "set",
+        const routeOperation = {
+          op: "set" as const,
           path: ["providers", MODELLIX_LLM_PROVIDER_ID],
           value: plan.route,
-        }], descriptor.revision);
+        };
+        await this.#settings.mutate(provenanceToken === undefined
+          ? [routeOperation]
+          : [
+              routeOperation,
+              {
+                op: "set",
+                path: [MODELLIX_LLM_PROVENANCE_FIELD],
+                value: provenanceToken,
+              },
+            ], descriptor.revision);
         applied = true;
       },
       rollback: async () => {
@@ -355,43 +395,96 @@ export class LlmSettingsMaterializer {
           : requireRecord(rollbackUser.providers, "user providers");
         const currentRoute = rollbackProviders[MODELLIX_LLM_PROVIDER_ID];
         const currentFingerprint = fingerprint(currentRoute);
-        if (currentFingerprint === previousFingerprint) {
+        const currentProvenance = rollbackUser[MODELLIX_LLM_PROVENANCE_FIELD];
+        if (
+          currentFingerprint === previousFingerprint &&
+          fingerprint(currentProvenance) === fingerprint(previousProvenance)
+        ) {
           rolledBack = true;
           return;
         }
-        if (currentFingerprint !== appliedFingerprint) {
+        if (
+          currentFingerprint !== appliedFingerprint ||
+          (provenanceToken !== undefined && currentProvenance !== provenanceToken)
+        ) {
           throw new LlmMaterializationRollbackError("route-changed");
         }
-        await this.#settings.mutate(previousRoute === undefined
+        const routeOperations = previousRoute === undefined
           ? [{
-              op: "unset",
+              op: "unset" as const,
               path: ["providers", MODELLIX_LLM_PROVIDER_ID],
             }]
           : [{
-              op: "set",
+              op: "set" as const,
               path: ["providers", MODELLIX_LLM_PROVIDER_ID],
               value: structuredClone(previousRoute),
-            }], rollbackDescriptor.revision);
+            }];
+        const provenanceOperations = provenanceToken === undefined
+          ? []
+          : previousProvenance === undefined
+            ? [{
+                op: "unset" as const,
+                path: [MODELLIX_LLM_PROVENANCE_FIELD],
+              }]
+            : [{
+                op: "set" as const,
+                path: [MODELLIX_LLM_PROVENANCE_FIELD],
+                value: previousProvenance,
+              }];
+        await this.#settings.mutate(
+          [...routeOperations, ...provenanceOperations],
+          rollbackDescriptor.revision,
+        );
         rolledBack = true;
       },
     };
   }
 
   async recoverInterruptedMaterialization(
-    ledger: LlmRouteLedger,
-    expectedSettingsRevision: number,
-  ): Promise<LlmRouteLedger> {
+    evidence: LlmInterruptedMaterializationEvidence,
+  ): Promise<LlmInterruptedMaterializationResult> {
+    if (
+      evidence.targetLedger.appliedRouteFingerprint === null ||
+      !/^[a-f0-9]{64}$/u.test(evidence.previousRouteFingerprint) ||
+      !isProvenanceToken(evidence.provenanceToken)
+    ) {
+      throw new Error("LLM materialization recovery evidence is incomplete");
+    }
     const descriptor = await this.#describeReady();
     if (descriptor === undefined) throw new Error("llm-pi-ai settings namespace is unavailable");
-    if (descriptor.revision < expectedSettingsRevision) {
-      throw new Error("llm-pi-ai settings revision regressed during materialization recovery");
-    }
     const user = descriptor.user === undefined ? {} : requireRecord(descriptor.user, "settings user section");
     const providers = user.providers === undefined ? {} : requireRecord(user.providers, "user providers");
-    return reconcileLlmRouteLedgerAfterInterruption(
-      providers[MODELLIX_LLM_PROVIDER_ID],
-      ledger,
-    );
+    const routeFingerprint = fingerprint(providers[MODELLIX_LLM_PROVIDER_ID]);
+    const provenance = user[MODELLIX_LLM_PROVENANCE_FIELD];
+    if (
+      routeFingerprint === evidence.previousRouteFingerprint &&
+      provenance !== evidence.provenanceToken
+    ) {
+      return { status: "not-applied", ledger: cloneLedger(evidence.previousLedger) };
+    }
+    if (
+      routeFingerprint === evidence.targetLedger.appliedRouteFingerprint &&
+      provenance === evidence.provenanceToken
+    ) {
+      return { status: "applied", ledger: cloneLedger(evidence.targetLedger) };
+    }
+    throw new Error("LLM route does not match the exact interrupted materialization evidence");
+  }
+
+  async clearProvenance(provenanceToken: string): Promise<void> {
+    if (!isProvenanceToken(provenanceToken)) {
+      throw new TypeError("provenanceToken must be a bounded non-secret operation identifier");
+    }
+    const descriptor = await this.#describeReady();
+    if (descriptor === undefined) return;
+    const user = descriptor.user === undefined
+      ? {}
+      : requireRecord(descriptor.user, "settings user section");
+    if (user[MODELLIX_LLM_PROVENANCE_FIELD] !== provenanceToken) return;
+    await this.#settings.mutate([{
+      op: "unset",
+      path: [MODELLIX_LLM_PROVENANCE_FIELD],
+    }], descriptor.revision);
   }
 
   async remove(ledger: LlmRouteLedger): Promise<LlmRouteLedger> {
@@ -457,6 +550,10 @@ function cloneLedger(ledger: LlmRouteLedger): LlmRouteLedger {
     appliedRouteFingerprint: ledger.appliedRouteFingerprint,
     entries: ledger.entries.map((entry) => ({ ...entry })),
   };
+}
+
+function isProvenanceToken(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(value);
 }
 
 function assertCatalog(catalog: readonly ModellixLlmModel[]): void {

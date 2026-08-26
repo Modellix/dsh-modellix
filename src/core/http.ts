@@ -21,6 +21,28 @@ export interface ApprovedHttpRequest {
   readonly authorizationAllowed: boolean;
 }
 
+export interface RequestDeadline {
+  readonly signal: AbortSignal;
+  readonly timedOut: () => boolean;
+}
+
+/** Combines a caller cancellation signal with an operation-owned deadline. */
+export function requestDeadline(
+  callerSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): RequestDeadline {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10 * 60_000) {
+    throw new TypeError("timeoutMs must be a positive safe integer no greater than ten minutes");
+  }
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return {
+    signal: callerSignal === undefined
+      ? timeoutSignal
+      : AbortSignal.any([callerSignal, timeoutSignal]),
+    timedOut: () => timeoutSignal.aborted && callerSignal?.aborted !== true,
+  };
+}
+
 export class HttpPolicyError extends Error {
   readonly code:
     | "INVALID_URL"
@@ -210,6 +232,35 @@ export function isAllowedModellixOrigin(value: string | URL): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Rejects literal private/reserved addresses and local-only DNS suffixes at a
+ * trust boundary. Remote fetch services must still repeat this check after DNS
+ * resolution and for every redirect to prevent DNS rebinding.
+ */
+export function isPublicHostname(value: string): boolean {
+  const hostname = value
+    .toLowerCase()
+    .replace(/^\[|\]$/gu, "")
+    .replace(/\.$/u, "");
+  const ipv4 = parseIpv4(hostname);
+  if (ipv4 !== null) return isPublicIpv4(ipv4);
+  if (hostname.includes(":")) {
+    const ipv6 = parseIpv6(hostname);
+    return ipv6 !== null && isPublicIpv6(ipv6);
+  }
+  if (!hostname.includes(".")) return false;
+  return ![
+    "localhost",
+    "local",
+    "internal",
+    "home",
+    "lan",
+    "test",
+    "invalid",
+    "onion",
+  ].some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
 }
 
 export interface HttpRetryFailure {
@@ -419,4 +470,65 @@ function normalizeDelay(
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function parseIpv4(value: string): readonly number[] | null {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  const bytes = parts.map((part) => Number(part));
+  return bytes.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    ? bytes
+    : null;
+}
+
+function isPublicIpv4(value: readonly number[]): boolean {
+  const [a = 0, b = 0, c = 0] = value;
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 192 && b === 88 && c === 99) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
+function parseIpv6(value: string): readonly number[] | null {
+  if (value.includes("%")) return null;
+  const halves = value.split("::");
+  if (halves.length > 2) return null;
+  const left = ipv6Half(halves[0] ?? "");
+  const right = ipv6Half(halves[1] ?? "");
+  if (left === null || right === null) return null;
+  if (halves.length === 1) return left.length === 8 ? left : null;
+  const missing = 8 - left.length - right.length;
+  if (missing < 1) return null;
+  return [...left, ...Array.from({ length: missing }, () => 0), ...right];
+}
+
+function ipv6Half(value: string): number[] | null {
+  if (value === "") return [];
+  const output: number[] = [];
+  for (const part of value.split(":")) {
+    if (!/^[a-f0-9]{1,4}$/u.test(part)) return null;
+    output.push(Number.parseInt(part, 16));
+  }
+  return output;
+}
+
+function isPublicIpv6(value: readonly number[]): boolean {
+  const first = value[0] ?? 0;
+  const second = value[1] ?? 0;
+  if ((first & 0xe000) !== 0x2000) return false;
+  if (first === 0x2002) return false;
+  if (first === 0x2001 && (second === 0 || second === 0x0db8)) return false;
+  return true;
 }

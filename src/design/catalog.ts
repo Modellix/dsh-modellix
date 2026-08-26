@@ -1,5 +1,5 @@
 import { DesignError } from "./errors.js";
-import { readBoundedResponseJson } from "../core/http.js";
+import { readBoundedResponseJson, requestDeadline } from "../core/http.js";
 import type { CachePort, ClockPort, FetchPort } from "./ports.js";
 import { systemClock } from "./ports.js";
 
@@ -52,6 +52,7 @@ export interface ModelCatalogClientOptions {
   readonly cache?: CachePort;
   readonly cacheTtlMs?: number;
   readonly clock?: ClockPort;
+  readonly requestTimeoutMs?: number;
 }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -60,6 +61,7 @@ const MAX_PAGE_SIZE = 100;
 const MAX_PAGE = 10_000;
 const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
 const MAX_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 export class ModelCatalogClient {
   readonly #fetch: FetchPort;
@@ -68,6 +70,7 @@ export class ModelCatalogClient {
   readonly #cache: CachePort | undefined;
   readonly #cacheTtlMs: number;
   readonly #clock: ClockPort;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: ModelCatalogClientOptions) {
     this.#fetch = options.fetch;
@@ -81,6 +84,11 @@ export class ModelCatalogClient {
       "cacheTtlMs",
     );
     this.#clock = options.clock ?? systemClock;
+    this.#requestTimeoutMs = boundedPositiveInteger(
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      10 * 60_000,
+      "requestTimeoutMs",
+    );
   }
 
   async list(query: ModelCatalogQuery, signal?: AbortSignal): Promise<ModelCatalogPage> {
@@ -103,6 +111,7 @@ export class ModelCatalogClient {
           signal,
         );
       } catch (caught) {
+        if (signal?.aborted === true) throw caught;
         if (!this.#allowPublicPortalFallback) {
           throw caught;
         }
@@ -154,18 +163,22 @@ export class ModelCatalogClient {
     }
 
     let response: Response;
+    const deadline = requestDeadline(signal, this.#requestTimeoutMs);
     try {
       response = await this.#fetch(url, {
         method: "GET",
         headers,
         redirect: "error",
-        ...(signal === undefined ? {} : { signal }),
+        signal: deadline.signal,
       });
     } catch (cause) {
+      if (signal?.aborted === true) throw cause;
       throw new DesignError(
         "CATALOG_UNAVAILABLE",
-        "The model catalog request failed",
-        { cause },
+        deadline.timedOut()
+          ? "The model catalog request timed out"
+          : "The model catalog request failed",
+        { cause, ...(deadline.timedOut() ? { status: 408 } : {}) },
       );
     }
     if (!response.ok) {
@@ -178,8 +191,20 @@ export class ModelCatalogClient {
 
     let payload: unknown;
     try {
-      payload = await readBoundedResponseJson(response, MAX_CATALOG_RESPONSE_BYTES, signal);
+      payload = await readBoundedResponseJson(
+        response,
+        MAX_CATALOG_RESPONSE_BYTES,
+        deadline.signal,
+      );
     } catch (cause) {
+      if (signal?.aborted === true) throw cause;
+      if (deadline.timedOut()) {
+        throw new DesignError(
+          "CATALOG_UNAVAILABLE",
+          "The model catalog response timed out",
+          { cause, status: 408 },
+        );
+      }
       throw new DesignError(
         "UNEXPECTED_RESPONSE",
         "The model catalog response is not bounded valid JSON",

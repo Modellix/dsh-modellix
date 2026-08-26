@@ -10,7 +10,6 @@ export const DESIGN_PLANNER_MODEL = "openai/gpt-5.6-luna";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
-const MAX_ERROR_BODY_BYTES = 8 * 1024;
 const MAX_COMPLETION_TOKENS = 1_200;
 const MAX_CLARIFICATION_LENGTH = 4_096;
 
@@ -93,64 +92,52 @@ export class DesignPlannerClient {
         redirect: "error",
         signal,
       });
-    } catch (error) {
-      throw transportError(request.signal, timeoutSignal, error);
+    } catch {
+      // Once fetch has been invoked, a transport/cancellation failure cannot
+      // prove that the billed LLM request was not accepted upstream.
+      throw submitUnknown();
     }
 
     if (response.redirected) {
       await cancelBody(response);
-      throw plannerError(
-        "PLANNER_RESPONSE_INVALID",
-        "Design planner refused a redirected response",
-        response.status,
-      );
+      throw submitUnknown(response.status);
     }
     if (!response.ok) {
-      await drainErrorBody(response, signal, request.signal, timeoutSignal);
+      // The HTTP status is already the authoritative submission decision.
+      // Error prose is untrusted and waiting for it could turn a definitive
+      // 401/402/403/429 into an ambiguous outcome when the body stalls.
+      await cancelBody(response);
       throw statusError(response.status);
     }
 
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
     if (!contentType.includes("application/json")) {
       await cancelBody(response);
-      throw plannerError(
-        "PLANNER_RESPONSE_INVALID",
-        "Design planner returned a non-JSON response",
-        response.status,
-      );
+      throw submitUnknown(response.status);
     }
 
     let text: string;
     try {
       text = await readBoundedText(response, MAX_RESPONSE_BYTES, signal);
-    } catch (error) {
-      if (error instanceof BodyLimitError) {
-        throw plannerError(
-          "PLANNER_RESPONSE_INVALID",
-          "Design planner response exceeded the allowed size",
-          response.status,
-        );
-      }
-      throw transportError(request.signal, timeoutSignal, error);
+    } catch {
+      throw submitUnknown(response.status);
     }
 
-    const wire = parsePlannerResponse(text, response.status);
-    const patch = validateWirePatch(wire, fields);
-    let parameters: Record<string, JsonValue>;
     try {
-      parameters = applyExactPatch(request.schema, request.current, patch);
-    } catch (_error) {
-      throw plannerError(
-        "PLANNER_RESPONSE_INVALID",
-        "Design planner returned an invalid model parameter update",
-        response.status,
-      );
+      const wire = parsePlannerResponse(text, response.status);
+      const patch = validateWirePatch(wire, fields);
+      const parameters = applyExactPatch(request.schema, request.current, patch);
+      return {
+        patch,
+        parameters,
+        needsClarification: wire.needsClarification,
+      };
+    } catch {
+      // A successful HTTP response can still be unusable. The request may
+      // already have been charged, so expose the same non-replayable outcome
+      // as a transport ambiguity instead of inviting a second paid call.
+      throw submitUnknown(response.status);
     }
-    return {
-      patch,
-      parameters,
-      needsClarification: wire.needsClarification,
-    };
   }
 }
 
@@ -504,7 +491,7 @@ async function readBoundedText(
       }
       bytes += chunk.byteLength;
       if (bytes > limit) {
-        await reader.cancel();
+        void reader.cancel().catch(() => undefined);
         throw new BodyLimitError();
       }
       text += decoder.decode(chunk, { stream: true });
@@ -540,25 +527,11 @@ interface StreamReadResult {
   readonly value: Uint8Array | undefined;
 }
 
-async function drainErrorBody(
-  response: Response,
-  signal: AbortSignal,
-  callerSignal: AbortSignal | undefined,
-  timeoutSignal: AbortSignal,
-): Promise<void> {
-  try {
-    await readBoundedText(response, MAX_ERROR_BODY_BYTES, signal);
-  } catch (error) {
-    if (error instanceof BodyLimitError) {
-      return;
-    }
-    throw transportError(callerSignal, timeoutSignal, error);
-  }
-}
-
 async function cancelBody(response: Response): Promise<void> {
   try {
-    await response.body?.cancel();
+    // Cancellation is cleanup, not part of the response decision. Do not let
+    // a hostile/stalled stream extend the operation beyond its deadline.
+    void response.body?.cancel().catch(() => undefined);
   } catch (_error) {
     // Cancellation is best effort and error content is intentionally discarded.
   }
@@ -591,37 +564,30 @@ function statusError(status: number): DesignError {
         status,
       );
     default:
+      if (
+        status === 0 ||
+        (status >= 300 && status < 400) ||
+        status === 408 ||
+        status === 409 ||
+        status === 425 ||
+        status >= 500
+      ) {
+        return submitUnknown(status);
+      }
       return plannerError(
-        status === 408 || status >= 500
-          ? "PLANNER_UNAVAILABLE"
-          : "PLANNER_REJECTED",
-        status === 408 || status >= 500
-          ? "Design planner is temporarily unavailable"
-          : "Design planner rejected the request",
+        "PLANNER_REJECTED",
+        "Design planner rejected the request",
         status,
       );
   }
 }
 
-function transportError(
-  callerSignal: AbortSignal | undefined,
-  timeoutSignal: AbortSignal,
-  error?: unknown,
-): DesignError {
-  if (callerSignal?.aborted === true) {
-    return plannerError("PLANNER_ABORTED", "Design planning was canceled");
-  }
-  if (timeoutSignal.aborted || errorName(error) === "TimeoutError") {
-    return plannerError("PLANNER_TIMEOUT", "Design planning timed out");
-  }
+function submitUnknown(status?: number): DesignError {
   return plannerError(
-    "PLANNER_UNAVAILABLE",
-    "Design planner is temporarily unavailable",
+    "SUBMIT_UNKNOWN",
+    "The paid Design planner outcome is unknown; do not retry automatically",
+    status,
   );
-}
-
-function errorName(value: unknown): string | null {
-  return value instanceof Error ? value.name : null;
 }
 
 function validateApiKey(value: string): string {

@@ -4,6 +4,7 @@ import {
   EMPTY_LLM_ROUTE_LEDGER,
   LlmRouteConflictError,
   LlmSettingsMaterializer,
+  MODELLIX_LLM_PROVENANCE_FIELD,
   planLlmRouteMaterialization,
   planLlmRouteRemoval,
   reconcileLlmRouteLedgerAfterInterruption,
@@ -183,12 +184,138 @@ describe("llm-pi-ai Modellix route materialization", () => {
 
     expect(prepared.changed).toBe(true);
     expect(prepared.expectedSettingsRevision).toBe(23);
+    expect(prepared.previousRouteFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(prepared.targetRouteFingerprint).toBe(prepared.ledger.appliedRouteFingerprint);
     expect(mutate).not.toHaveBeenCalled();
     await prepared.apply();
     expect(mutate).toHaveBeenCalledWith([expect.objectContaining({
       op: "set",
       path: ["providers", "modellix"],
     })], 23);
+  });
+
+  it("writes the ordinary route and recovery provenance in one guarded Settings mutation", async () => {
+    const provenanceToken = "llm_atomic_materialization_1234";
+    const mutate = vi.fn(async () => undefined);
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => ({ revision: 29, value: { providers: {} }, user: { providers: {} } }),
+      mutate,
+    });
+    const prepared = await materializer.prepareMaterialization(
+      catalog,
+      EMPTY_LLM_ROUTE_LEDGER,
+      provenanceToken,
+    );
+
+    await prepared.apply();
+
+    expect(prepared.ledger.appliedRouteFingerprint).toBe(prepared.targetRouteFingerprint);
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate).toHaveBeenCalledWith([
+      expect.objectContaining({
+        op: "set",
+        path: ["providers", "modellix"],
+        value: expect.not.objectContaining({
+          [MODELLIX_LLM_PROVENANCE_FIELD]: expect.anything(),
+        }),
+      }),
+      {
+        op: "set",
+        path: [MODELLIX_LLM_PROVENANCE_FIELD],
+        value: provenanceToken,
+      },
+    ], 29);
+  });
+
+  it("recovers only an exact pre-write or single-CAS target route", async () => {
+    const provenanceToken = "llm_recovery_contract_1234";
+    const plan = planLlmRouteMaterialization(undefined, catalog, EMPTY_LLM_ROUTE_LEDGER);
+    let descriptor: { revision: number; value: unknown; user: unknown } = {
+      revision: 0,
+      value: { providers: {} },
+      user: { providers: {} },
+    };
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => descriptor,
+      mutate: vi.fn(async () => undefined),
+    });
+    const prepared = await materializer.prepareMaterialization(
+      catalog,
+      EMPTY_LLM_ROUTE_LEDGER,
+      provenanceToken,
+    );
+    const evidence = {
+      previousLedger: EMPTY_LLM_ROUTE_LEDGER,
+      targetLedger: plan.ledger,
+      previousRouteFingerprint: prepared.previousRouteFingerprint,
+      provenanceToken,
+    } as const;
+
+    await expect(materializer.recoverInterruptedMaterialization(evidence))
+      .resolves.toEqual({ status: "not-applied", ledger: EMPTY_LLM_ROUTE_LEDGER });
+
+    descriptor = {
+      revision: 1,
+      value: { providers: { modellix: plan.route } },
+      user: {
+        providers: { modellix: plan.route },
+        [MODELLIX_LLM_PROVENANCE_FIELD]: provenanceToken,
+      },
+    };
+    await expect(materializer.recoverInterruptedMaterialization(evidence))
+      .resolves.toEqual({ status: "applied", ledger: plan.ledger });
+
+    // Settings revisions restart from zero with a fresh registration; the
+    // provenance field remains durable in the raw user namespace section.
+    descriptor = {
+      revision: 0,
+      value: { providers: { modellix: plan.route } },
+      user: {
+        providers: { modellix: plan.route },
+        [MODELLIX_LLM_PROVENANCE_FIELD]: provenanceToken,
+      },
+    };
+    await expect(materializer.recoverInterruptedMaterialization(evidence))
+      .resolves.toEqual({ status: "applied", ledger: plan.ledger });
+
+    const driftedRoute = { ...plan.route, userHeaderPolicy: "keep-me" };
+    descriptor = {
+      revision: 1,
+      value: { providers: { modellix: driftedRoute } },
+      user: {
+        providers: { modellix: driftedRoute },
+        [MODELLIX_LLM_PROVENANCE_FIELD]: provenanceToken,
+      },
+    };
+    await expect(materializer.recoverInterruptedMaterialization(evidence))
+      .rejects.toThrow(/exact interrupted materialization evidence/);
+  });
+
+  it("clears only the exact committed recovery provenance token", async () => {
+    let descriptor = {
+      revision: 7,
+      value: { providers: {} },
+      user: { [MODELLIX_LLM_PROVENANCE_FIELD]: "llm_other_operation_1234" },
+    };
+    const mutate = vi.fn(async () => undefined);
+    const materializer = new LlmSettingsMaterializer({
+      describe: async () => descriptor,
+      mutate,
+    });
+
+    await materializer.clearProvenance("llm_committed_operation_1234");
+    expect(mutate).not.toHaveBeenCalled();
+
+    descriptor = {
+      revision: 8,
+      value: { providers: {} },
+      user: { [MODELLIX_LLM_PROVENANCE_FIELD]: "llm_committed_operation_1234" },
+    };
+    await materializer.clearProvenance("llm_committed_operation_1234");
+    expect(mutate).toHaveBeenCalledWith([{
+      op: "unset",
+      path: [MODELLIX_LLM_PROVENANCE_FIELD],
+    }], 8);
   });
 
   it("ignores schema-expanded effective defaults when the raw owned route is unchanged", async () => {

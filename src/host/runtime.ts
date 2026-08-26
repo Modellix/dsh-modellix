@@ -66,6 +66,7 @@ const LLM_SETTINGS_NAMESPACE = settingsNamespace("llm-pi-ai");
 const LLM_OWNERSHIP_ROLLBACK_FAILED = "MODELLIX_LLM_OWNERSHIP_ROLLBACK_FAILED";
 const LLM_MATERIALIZATION_RECOVERED = "MODELLIX_LLM_MATERIALIZATION_RECOVERED";
 const LLM_MATERIALIZATION_RECOVERY_FAILED = "MODELLIX_LLM_MATERIALIZATION_RECOVERY_FAILED";
+const LLM_PROVENANCE_CLEANUP_FAILED = "MODELLIX_LLM_PROVENANCE_CLEANUP_FAILED";
 
 class LlmOwnershipRollbackFailure extends Error {
   constructor() {
@@ -92,6 +93,8 @@ export interface ModellixRuntimeState {
   readonly onboarding: {
     readonly status: PluginConfig["onboarding"]["status"];
     readonly recoveryPending: boolean;
+    /** Non-secret, process-local token for the latest explicit capability recovery request. */
+    readonly recoveryRequestId: string | null;
   };
   readonly llm: {
     readonly health: "unknown" | "ready" | "missing" | "disabled" | "error" | "policy-blocked";
@@ -122,6 +125,7 @@ export class ModellixRuntime {
   #writeTail: Promise<void> = Promise.resolve();
   #designTail: Promise<void> = Promise.resolve();
   #credentialMutationInFlight = false;
+  #credentialRecoveryRequestId: string | null = null;
   #designPollTimer: ReturnType<typeof setTimeout> | undefined;
   #disposeDesignTools: (() => void) | undefined;
   #closing = false;
@@ -208,11 +212,7 @@ export class ModellixRuntime {
       resolveCredential: () => this.resolveUsableCredential(),
       isCredentialEpochCurrent: (epoch) => epoch === this.#credential.credentialEpoch,
       onUnauthorized: (epoch) => {
-        this.#credentialState = applyRuntimeUnauthorized(
-          this.#credentialState,
-          epoch,
-          Date.now(),
-        ).state;
+        this.markCredentialRejected(epoch);
       },
       isEnabled: () => this.#config.services.design.enabled,
       getLastModel: () => this.#config.services.design.lastModel,
@@ -284,17 +284,14 @@ export class ModellixRuntime {
       hasCredential: () => this.credentialIsUsable(),
       resolveCredential: async () => {
         const hit = await this.resolveUsableCredential();
+        if (hit === undefined) this.requestCredentialRecovery();
         return hit === undefined ? null : { apiKey: hit.value, credentialEpoch: hit.credentialEpoch };
       },
       getUserId: () => this.#userId,
       isCredentialEpochCurrent: (epoch) => epoch === this.#config.credentialEpoch,
       onCredentialRejected: async (epoch) => {
         if (epoch !== this.#config.credentialEpoch) return;
-        this.#credentialState = applyRuntimeUnauthorized(
-          this.#credentialState,
-          epoch,
-          Date.now(),
-        ).state;
+        this.markCredentialRejected(epoch);
       },
     }), "dsh-modellix: native Web providers");
 
@@ -348,6 +345,9 @@ export class ModellixRuntime {
           return success(await this.refreshLlmRpc(operationSignal));
         default:
           if (endpoint.startsWith("design/")) {
+            if (designEndpointRequestsCredential(endpoint) && !this.credentialIsUsable()) {
+              this.requestCredentialRecovery();
+            }
             const snapshot = await this.enqueueDesignWrite(
               () => this.#design.handle(endpoint, payload, operationSignal),
             );
@@ -357,6 +357,16 @@ export class ModellixRuntime {
           return badRequest("Unknown Modellix endpoint");
       }
     } catch (error) {
+      // A paid Design POST may have been accepted before the caller aborted.
+      // Preserve the domain's non-replayable outcome before the generic RPC
+      // cancellation mapping, otherwise a proposal can be billed twice.
+      if (error instanceof DesignError && error.code === "SUBMIT_UNKNOWN") {
+        return success({
+          version: 1,
+          accepted: false,
+          error: { code: designRpcErrorCode(error) },
+        });
+      }
       if (operationSignal.aborted || isAbortFailure(error)) return cancelled();
       if (error instanceof CredentialEpochConflictError) {
         return success({
@@ -399,6 +409,9 @@ export class ModellixRuntime {
       await this.#credential.describe(),
     );
     const credential = this.#credentialState;
+    if (credential.descriptor.configured && credential.verification !== "invalid") {
+      this.clearCredentialRecoveryRequest();
+    }
     return {
       version: 1,
       settingsRevision: snapshot.revision,
@@ -411,6 +424,7 @@ export class ModellixRuntime {
       onboarding: {
         status: this.#config.onboarding.status,
         recoveryPending: this.#config.onboarding.saveRecovery !== null,
+        recoveryRequestId: this.#credentialRecoveryRequestId,
       },
       llm: { ...this.#llm },
     };
@@ -467,6 +481,7 @@ export class ModellixRuntime {
             this.#credential.credentialEpoch,
             "valid",
           ).state;
+          this.clearCredentialRecoveryRequest();
           this.#catalog.invalidate();
           if (this.#config.services.llm.enabled) {
             await this.refreshLlm(false, this.#lifecycleAbort.signal).catch(() => undefined);
@@ -527,6 +542,7 @@ export class ModellixRuntime {
         mutation.credentialEpoch,
         "valid",
       ).state;
+      this.clearCredentialRecoveryRequest();
       this.#catalog.invalidate();
       if (this.#config.services.llm.enabled) {
         await this.refreshLlm(false, this.#lifecycleAbort.signal).catch(() => undefined);
@@ -551,24 +567,62 @@ export class ModellixRuntime {
       let mutation: Awaited<ReturnType<CredentialBroker["unset"]>>;
       try {
         mutation = await this.#credential.unset(expectedCredentialEpoch);
+      } catch (error) {
+        // Credential providers may durably delete the local value and still
+        // reject while publishing or acknowledging the mutation. A fresh
+        // descriptor is the only authoritative, non-secret recovery signal;
+        // never replay unset merely to obtain a successful acknowledgement.
+        const observed = await this.#credential.describe().catch(() => undefined);
+        if (observed?.configured !== false) throw error;
+        const recoveredCredentialEpoch = expectedCredentialEpoch + 1;
+        this.#credential.synchronizeRecoveredEpoch(recoveredCredentialEpoch);
+        mutation = {
+          value: undefined,
+          previousEpoch: expectedCredentialEpoch,
+          credentialEpoch: recoveredCredentialEpoch,
+        };
       } finally {
         this.#credentialMutationInFlight = false;
       }
       if (await this.#credential.resolve() !== undefined) {
         throw new Error("Credential changed before removal was confirmed");
       }
-      const withoutRoute = await this.#materializer.remove(toLlmLedger(snapshot.config));
-      await this.#settings.replace({
-        ...snapshot.config,
-        credentialEpoch: mutation.credentialEpoch,
-        onboarding: { status: "active", saveRecovery: null },
-        llmOwnership: { ...snapshot.config.llmOwnership, route: withoutRoute },
-      }, snapshot.revision);
+      // From this point Credential absence is authoritative. Publish that fact
+      // in process before touching the independently-owned LLM/Settings stores,
+      // so a downstream failure cannot leave subsequent saves using the stale
+      // descriptor generation.
+      this.#credentialState = applyCredentialDescriptor(
+        this.#credentialState,
+        await this.#credential.describe(),
+      );
+      try {
+        const withoutRoute = await this.#materializer.remove(toLlmLedger(snapshot.config));
+        await this.#settings.replace({
+          ...snapshot.config,
+          credentialEpoch: mutation.credentialEpoch,
+          onboarding: { status: "active", saveRecovery: null },
+          llmOwnership: { ...snapshot.config.llmOwnership, route: withoutRoute },
+        }, snapshot.revision);
+      } catch (error) {
+        // The same idempotent reconciliation used at startup also closes the
+        // post-unset window immediately. It never replays the destructive
+        // Credential mutation and leaves the ownership ledger intact when the
+        // external LLM namespace is still unavailable.
+        await this.reconcileMissingCredentialState(mutation.credentialEpoch).catch(() => undefined);
+        this.#catalog.invalidate();
+        this.#llm = {
+          health: this.#credentialState.descriptor.configured ? "error" : "missing",
+          modelCount: 0,
+          refreshedAt: null,
+        };
+        throw error;
+      }
       this.#config = this.#settings.read().config;
       this.#credentialState = applyCredentialDescriptor(
         this.#credentialState,
         await this.#credential.describe(),
       );
+      this.clearCredentialRecoveryRequest();
       this.#catalog.invalidate();
       this.#llm = {
         health: this.#credentialState.descriptor.configured ? "error" : "missing",
@@ -622,6 +676,7 @@ export class ModellixRuntime {
 
   private async refreshLlmRpc(signal: AbortSignal): Promise<unknown> {
     return this.enqueueWrite(async () => {
+      if (!this.credentialIsUsable()) this.requestCredentialRecovery();
       const result = await this.refreshLlm(true, signal);
       if (isRecord(result) && result.accepted === false) return result;
       return { version: 1, accepted: true, state: await this.state() };
@@ -697,12 +752,16 @@ export class ModellixRuntime {
         capturedEpoch,
         this.#config.credentialEpoch,
       );
+      const materializationOperationId = `llm_${randomUUID().replaceAll("-", "")}`;
       const materialization = await this.#materializer.prepareMaterialization(
         catalog.models,
         toLlmLedger(this.#config),
+        materializationOperationId,
       );
       const ledger = materialization.ledger;
-      let operationId: string | null = null;
+      const operationId = materialization.changed
+        ? materializationOperationId
+        : null;
       if (materialization.changed) {
         const intentSnapshot = this.#settings.read();
         if (
@@ -711,11 +770,12 @@ export class ModellixRuntime {
         ) {
           throw new StaleLlmCatalogError(capturedEpoch, intentSnapshot.config.credentialEpoch);
         }
-        operationId = `llm_${randomUUID().replaceAll("-", "")}`;
         await this.#settings.replace(beginLlmMaterialization(intentSnapshot.config, {
-          operationId,
+          operationId: materializationOperationId,
           startedAt: Date.now(),
           expectedLlmSettingsRevision: materialization.expectedSettingsRevision,
+          previousRouteFingerprint: materialization.previousRouteFingerprint,
+          targetRouteOwnership: ledger,
         }), intentSnapshot.revision);
         this.#config = this.#settings.read().config;
       }
@@ -745,7 +805,7 @@ export class ModellixRuntime {
               ...snapshot.config,
               llmOwnership: { ...snapshot.config.llmOwnership, route: ledger },
             }
-          : completeLlmMaterialization(snapshot.config, operationId, ledger);
+          : completeLlmMaterialization(snapshot.config, operationId);
         await this.#settings.replace(committed, snapshot.revision);
       } catch (error) {
         const commitStatus = this.observeLlmOwnershipCommit(operationId, ledger);
@@ -760,12 +820,16 @@ export class ModellixRuntime {
         // would split an already committed ledger from its route.
       }
       this.#config = this.#settings.read().config;
+      if (operationId !== null) {
+        await this.clearLlmProvenanceBestEffort(operationId);
+      }
       this.#llm = { health: "ready", modelCount: catalog.models.length, refreshedAt: catalog.fetchedAt };
       this.#credentialState = applyVerificationResult(
         this.#credentialState,
         capturedEpoch,
         "valid",
       ).state;
+      this.clearCredentialRecoveryRequest();
       if (signal?.aborted === true || this.#closing) {
         throw new DOMException("Plugin is stopping", "AbortError");
       }
@@ -773,11 +837,7 @@ export class ModellixRuntime {
     } catch (error) {
       if (isAbortFailure(error)) throw error;
       if (error instanceof LlmCatalogRequestError && isCredentialInvalidError(error.contract)) {
-        this.#credentialState = applyRuntimeUnauthorized(
-          this.#credentialState,
-          capturedEpoch,
-          Date.now(),
-        ).state;
+        this.markCredentialRejected(capturedEpoch);
       }
       this.#llm = {
         health: error instanceof StaleLlmCatalogError
@@ -867,10 +927,16 @@ export class ModellixRuntime {
     const recovery = snapshot.config.llmOwnership.materializationRecovery;
     if (recovery === null) return true;
     try {
-      const ledger = await this.#materializer.recoverInterruptedMaterialization(
-        toLlmLedger(snapshot.config),
-        recovery.expectedLlmSettingsRevision,
-      );
+      if (
+        recovery.previousRouteFingerprint === null ||
+        recovery.targetRouteOwnership === null
+      ) throw new LlmMaterializationRecoveryFailure();
+      const recoveryResult = await this.#materializer.recoverInterruptedMaterialization({
+        previousLedger: toLlmLedger(snapshot.config),
+        targetLedger: toLlmLedgerFromOwnership(recovery.targetRouteOwnership),
+        previousRouteFingerprint: recovery.previousRouteFingerprint,
+        provenanceToken: recovery.operationId,
+      });
       const current = this.#settings.read();
       const currentRecovery = current.config.llmOwnership.materializationRecovery;
       if (currentRecovery === null) {
@@ -880,14 +946,18 @@ export class ModellixRuntime {
       if (currentRecovery.operationId !== recovery.operationId) {
         throw new LlmMaterializationRecoveryFailure();
       }
-      await this.#settings.replace(
-        completeLlmMaterialization(current.config, recovery.operationId, ledger),
-        current.revision,
-      );
+      await this.#settings.replace(recoveryResult.status === "applied"
+        ? completeLlmMaterialization(current.config, recovery.operationId)
+        : abandonLlmMaterialization(current.config, recovery.operationId), current.revision);
       this.#config = this.#settings.read().config;
+      if (recoveryResult.status === "applied") {
+        await this.clearLlmProvenanceBestEffort(recovery.operationId);
+      }
       this.recordLlmRecoveryDiagnostic(
         "warn",
-        `${LLM_MATERIALIZATION_RECOVERED}: pending ownership was reconciled conservatively`,
+        recoveryResult.status === "applied"
+          ? `${LLM_MATERIALIZATION_RECOVERED}: exact pending route ownership was committed`
+          : `${LLM_MATERIALIZATION_RECOVERED}: unapplied pending route intent was cleared`,
       );
       return true;
     } catch {
@@ -912,17 +982,35 @@ export class ModellixRuntime {
     }
   }
 
+  private async clearLlmProvenanceBestEffort(operationId: string): Promise<void> {
+    try {
+      await this.#materializer.clearProvenance(operationId);
+    } catch {
+      // The route and ownership ledger are already committed. A stale opaque
+      // token is harmless and a later materialization may replace it; never
+      // roll back the committed route solely because cleanup raced another writer.
+      this.recordLlmRecoveryDiagnostic(
+        "warn",
+        `${LLM_PROVENANCE_CLEANUP_FAILED}: committed recovery provenance was retained`,
+      );
+    }
+  }
+
   /**
    * Finish an interrupted remove or an out-of-process Credential deletion.
-   * The prior completed onboarding state is the non-secret evidence that one
+   * An in-process caller supplies the exact confirmed Broker mutation epoch;
+   * otherwise completed onboarding is the non-secret evidence that one
    * Credential generation disappeared while this process was offline.
    */
-  private async reconcileMissingCredentialState(): Promise<void> {
+  private async reconcileMissingCredentialState(
+    authoritativeCredentialEpoch?: number,
+  ): Promise<void> {
     if (this.#credentialState.descriptor.configured) return;
     const snapshot = this.#settings.read();
     const lostConfiguredCredential =
       snapshot.config.onboarding.status === "completed" &&
       snapshot.config.onboarding.saveRecovery === null;
+    const confirmedInProcessRemoval = authoritativeCredentialEpoch !== undefined;
     let ledger = toLlmLedger(snapshot.config);
     if (ledger.ownership !== "none") {
       try {
@@ -933,10 +1021,10 @@ export class ModellixRuntime {
         // retryable on the next settings reconciliation or Host start.
       }
     }
-    const nextEpoch = lostConfiguredCredential
+    const nextEpoch = authoritativeCredentialEpoch ?? (lostConfiguredCredential
       ? snapshot.config.credentialEpoch + 1
-      : snapshot.config.credentialEpoch;
-    const nextOnboarding = lostConfiguredCredential
+      : snapshot.config.credentialEpoch);
+    const nextOnboarding = confirmedInProcessRemoval || lostConfiguredCredential
       ? { status: "active" as const, saveRecovery: null }
       : snapshot.config.onboarding;
     if (
@@ -971,6 +1059,29 @@ export class ModellixRuntime {
       this.#credentialState.verification === "invalid" &&
       this.#credentialState.invalidEpoch?.credentialEpoch === descriptor.credentialEpoch
     );
+  }
+
+  private requestCredentialRecovery(): void {
+    this.#credentialRecoveryRequestId = `recovery_${randomUUID().replaceAll("-", "")}`;
+  }
+
+  private clearCredentialRecoveryRequest(): void {
+    this.#credentialRecoveryRequestId = null;
+  }
+
+  /** Coalesces concurrent 401s while explicit later capability calls get a fresh token. */
+  private markCredentialRejected(credentialEpoch: number): void {
+    const alreadyInvalid =
+      this.#credentialState.verification === "invalid" &&
+      this.#credentialState.invalidEpoch?.credentialEpoch === credentialEpoch;
+    this.#credentialState = applyRuntimeUnauthorized(
+      this.#credentialState,
+      credentialEpoch,
+      Date.now(),
+    ).state;
+    if (!alreadyInvalid && this.#credentialState.verification === "invalid") {
+      this.requestCredentialRecovery();
+    }
   }
 
   private async resolveUsableCredential(): Promise<
@@ -1023,6 +1134,9 @@ export class ModellixRuntime {
           const operationSignal = signal === undefined
             ? this.#lifecycleAbort.signal
             : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
+          if (designEndpointRequestsCredential(endpoint) && !this.credentialIsUsable()) {
+            this.requestCredentialRecovery();
+          }
           return this.enqueueDesignWrite(
             () => this.#design.handle(endpoint, payload, operationSignal),
           );
@@ -1054,10 +1168,16 @@ export class ModellixRuntime {
 }
 
 function toLlmLedger(config: PluginConfig): LlmRouteLedger {
+  return toLlmLedgerFromOwnership(config.llmOwnership.route);
+}
+
+function toLlmLedgerFromOwnership(
+  route: PluginConfig["llmOwnership"]["route"],
+): LlmRouteLedger {
   return {
-    ownership: config.llmOwnership.route.ownership,
-    appliedRouteFingerprint: config.llmOwnership.route.appliedRouteFingerprint,
-    entries: config.llmOwnership.route.entries.map((entry) => ({ ...entry })),
+    ownership: route.ownership,
+    appliedRouteFingerprint: route.appliedRouteFingerprint,
+    entries: route.entries.map((entry) => ({ ...entry })),
   };
 }
 
@@ -1117,6 +1237,18 @@ function isAbortFailure(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function designEndpointRequestsCredential(endpoint: string): boolean {
+  switch (endpoint) {
+    case "design/refresh":
+    case "design/select-model":
+    case "design/propose":
+    case "design/submit":
+      return true;
+    default:
+      return false;
+  }
+}
+
 function success(value: unknown): RpcResult<unknown> {
   return { ok: true, value };
 }
@@ -1141,6 +1273,14 @@ function internalError(): RpcResult<unknown> {
 }
 
 function designRpcErrorCode(error: DesignError): string {
+  // Outcome semantics take precedence over the transport status. In
+  // particular, an HTTP 408/5xx from a billed POST is still non-replayable.
+  switch (error.code) {
+    case "SUBMIT_UNKNOWN":
+      return "MODELLIX_SUBMIT_UNKNOWN";
+    case "PLANNER_ABORTED":
+      return "cancelled";
+  }
   switch (error.status) {
     case 401:
       return "MODELLIX_UNAUTHORIZED";
@@ -1172,8 +1312,6 @@ function designRpcErrorCode(error: DesignError): string {
     case "ENDPOINT_NOT_ALLOWED":
     case "PLANNER_FORBIDDEN":
       return "MODELLIX_POLICY_BLOCKED";
-    case "SUBMIT_UNKNOWN":
-      return "MODELLIX_SUBMIT_UNKNOWN";
     case "PLANNER_UNAUTHORIZED":
       return "MODELLIX_UNAUTHORIZED";
     case "PLANNER_BILLING_BLOCKED":
@@ -1184,8 +1322,6 @@ function designRpcErrorCode(error: DesignError): string {
       return "MODELLIX_TIMEOUT";
     case "PLANNER_UNAVAILABLE":
       return "MODELLIX_SERVER_ERROR";
-    case "PLANNER_ABORTED":
-      return "cancelled";
     case "SUBMIT_REJECTED":
     case "TASK_READ_FAILED":
       return "MODELLIX_SERVER_ERROR";

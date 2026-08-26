@@ -12,6 +12,8 @@ import {
   parseRetryAfter,
   approveHttpRequest,
   redactForLog,
+  readBoundedResponseText,
+  requestDeadline,
   toModellixError,
   type ModellixErrorContract,
   type RedactedValue,
@@ -32,6 +34,7 @@ export const MODELLIX_WEB_PROVIDER_ID = "modellix" as const;
 const USER_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const MAX_API_KEY_CHARS = 16 * 1024;
 const MAX_CONFIGURED_RESPONSE_BYTES = 8 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 export interface ModellixWebCredentialSnapshot {
   /** Host-only secret. It must be resolved for each operation and never cached. */
@@ -56,6 +59,7 @@ export interface ModellixWebProviderOptions {
   ) => void | Promise<void>;
   readonly fetchImpl?: typeof globalThis.fetch;
   readonly maxResponseBytes?: number;
+  readonly requestTimeoutMs?: number;
   readonly now?: () => number;
 }
 
@@ -129,7 +133,7 @@ export class ModellixWebSearchProvider implements WebSearchProvider {
     try {
       return parseSearchResponse(payload.text, body.max_results).result;
     } catch (error) {
-      throw unexpectedResponseError("search", payload.credentialEpoch, error);
+      throw paidOutcomeUnknownError("search", payload.credentialEpoch, error);
     }
   }
 }
@@ -173,7 +177,7 @@ export class ModellixWebFetchProvider implements WebFetchProvider {
       if (error instanceof ModellixWebFetchFailedError) {
         throw error;
       }
-      throw unexpectedResponseError("fetch", payload.credentialEpoch, error);
+      throw paidOutcomeUnknownError("fetch", payload.credentialEpoch, error);
     }
   }
 }
@@ -216,6 +220,7 @@ class ModellixWebTransport {
   readonly #options: ModellixWebProviderOptions;
   readonly #fetch: typeof globalThis.fetch;
   readonly #maximumResponseBytes: number;
+  readonly #requestTimeoutMs: number;
   readonly #now: () => number;
 
   constructor(options: ModellixWebProviderOptions) {
@@ -224,6 +229,7 @@ class ModellixWebTransport {
     this.#maximumResponseBytes = normalizeMaximumResponseBytes(
       options.maxResponseBytes,
     );
+    this.#requestTimeoutMs = normalizeRequestTimeout(options.requestTimeoutMs);
     this.#now = options.now ?? Date.now;
   }
 
@@ -251,9 +257,7 @@ class ModellixWebTransport {
         "WEB_PROVIDER_UNAVAILABLE",
       );
     }
-    if (signal?.aborted === true) {
-      throw canceledRequestError(subsystem, signal);
-    }
+    throwIfCanceledBeforeDispatch(subsystem, signal);
 
     let credential: ModellixWebCredentialSnapshot | null;
     try {
@@ -302,8 +306,10 @@ class ModellixWebTransport {
     } catch (error) {
       throw unexpectedResponseError(subsystem, credential.credentialEpoch, error);
     }
+    throwIfCanceledBeforeDispatch(subsystem, signal);
 
     let response: Response;
+    const deadline = requestDeadline(signal, this.#requestTimeoutMs);
     try {
       response = await this.#fetch(approvedUrl, {
         method: "POST",
@@ -315,15 +321,11 @@ class ModellixWebTransport {
           "x-mdlx-user-id": userId,
         },
         body: JSON.stringify(body),
-        ...(signal === undefined ? {} : { signal }),
+        signal: deadline.signal,
       });
-      throwIfAborted(signal);
+      throwIfAborted(deadline.signal);
     } catch (error) {
-      const contract = toModellixError(
-        operationContext(subsystem, credential.credentialEpoch),
-        transportFailure(error, signal),
-      );
-      throw new ModellixWebProviderError(contract, { error });
+      throw paidOutcomeUnknownError(subsystem, credential.credentialEpoch, error);
     }
 
     if (
@@ -331,7 +333,8 @@ class ModellixWebTransport {
       response.status === 0 ||
       (response.status >= 300 && response.status < 400)
     ) {
-      throw unexpectedResponseError(
+      void response.body?.cancel().catch(() => undefined);
+      throw paidOutcomeUnknownError(
         subsystem,
         credential.credentialEpoch,
         new ModellixWebContractError("Credential-bearing redirects are forbidden"),
@@ -339,11 +342,17 @@ class ModellixWebTransport {
     }
 
     if (response.status !== 200) {
-      await this.#throwHttpError(response, subsystem, credential.credentialEpoch, signal);
+      await this.#throwHttpError(
+        response,
+        subsystem,
+        credential.credentialEpoch,
+        deadline.signal,
+      );
     }
 
     if (!isJsonContentType(response.headers.get("content-type"))) {
-      throw unexpectedResponseError(
+      void response.body?.cancel().catch(() => undefined);
+      throw paidOutcomeUnknownError(
         subsystem,
         credential.credentialEpoch,
         new ModellixWebContractError("Modellix returned a non-JSON response"),
@@ -351,24 +360,14 @@ class ModellixWebTransport {
     }
 
     try {
-      const text = await readBoundedText(
+      const text = await readBoundedResponseText(
         response,
         this.#maximumResponseBytes,
-        signal,
+        deadline.signal,
       );
       return { text, credentialEpoch: credential.credentialEpoch };
     } catch (error) {
-      const failure = transportFailure(error, signal);
-      if (failure.kind === "abort" || failure.kind === "timeout") {
-        throw new ModellixWebProviderError(
-          toModellixError(
-            operationContext(subsystem, credential.credentialEpoch),
-            failure,
-          ),
-          { error },
-        );
-      }
-      throw unexpectedResponseError(subsystem, credential.credentialEpoch, error);
+      throw paidOutcomeUnknownError(subsystem, credential.credentialEpoch, error);
     }
   }
 
@@ -380,27 +379,23 @@ class ModellixWebTransport {
   ): Promise<never> {
     let requestId: string | null = null;
     try {
-      const text = await readBoundedText(
+      const text = await readBoundedResponseText(
         response,
         this.#maximumResponseBytes,
         signal,
       );
       requestId = errorRequestId(text);
-    } catch (error) {
-      const failure = transportFailure(error, signal);
-      if (failure.kind === "abort" || failure.kind === "timeout") {
-        throw new ModellixWebProviderError(
-          toModellixError(operationContext(subsystem, credentialEpoch), failure),
-          { error },
-        );
-      }
+    } catch {
       // The status remains authoritative even when an optional error envelope
-      // is malformed or too large. No remote message is reflected.
+      // is malformed, too large, or canceled. No remote message is reflected.
     }
 
-    const contract = toModellixError(
-      operationContext(subsystem, credentialEpoch),
-      {
+    const failure =
+      (response.status >= 200 && response.status < 300) ||
+      response.status === 408 ||
+      response.status >= 500
+      ? { kind: "submit-unknown" } as const
+      : {
         kind: "http",
         status: response.status,
         requestId,
@@ -408,7 +403,10 @@ class ModellixWebTransport {
           response.headers.get("retry-after"),
           this.#now(),
         ),
-      },
+      } as const;
+    const contract = toModellixError(
+      operationContext(subsystem, credentialEpoch),
+      failure,
     );
 
     if (
@@ -443,53 +441,6 @@ class ModellixWebTransport {
     } catch {
       return false;
     }
-  }
-}
-
-async function readBoundedText(
-  response: Response,
-  maximumBytes: number,
-  signal?: AbortSignal,
-): Promise<string> {
-  const contentLength = response.headers.get("content-length");
-  if (contentLength !== null && /^\d+$/u.test(contentLength)) {
-    const declared = Number(contentLength);
-    if (!Number.isSafeInteger(declared) || declared > maximumBytes) {
-      throw new ModellixWebContractError("Modellix response exceeds the byte limit");
-    }
-  }
-
-  if (response.body === null) {
-    throw new ModellixWebContractError("Modellix response has no body");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const parts: string[] = [];
-  let received = 0;
-  try {
-    while (true) {
-      throwIfAborted(signal);
-      const chunk = await reader.read();
-      if (chunk.done) {
-        break;
-      }
-      received += chunk.value.byteLength;
-      if (received > maximumBytes) {
-        throw new ModellixWebContractError(
-          "Modellix response exceeds the byte limit",
-        );
-      }
-      parts.push(decoder.decode(chunk.value, { stream: true }));
-    }
-    parts.push(decoder.decode());
-    throwIfAborted(signal);
-    return parts.join("");
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  } finally {
-    reader.releaseLock();
   }
 }
 
@@ -536,7 +487,7 @@ function localContractError(
       },
       { kind: "http", status: 400 },
     ),
-    { error },
+    { error: redactedCause(error) },
   );
 }
 
@@ -549,7 +500,20 @@ function unexpectedResponseError(
     toModellixError(operationContext(subsystem, credentialEpoch), {
       kind: "unexpected-response",
     }),
-    { error },
+    { error: redactedCause(error) },
+  );
+}
+
+function paidOutcomeUnknownError(
+  subsystem: "search" | "fetch",
+  credentialEpoch: number,
+  error: unknown,
+): ModellixWebProviderError {
+  return new ModellixWebProviderError(
+    toModellixError(operationContext(subsystem, credentialEpoch), {
+      kind: "submit-unknown",
+    }),
+    { error: redactedCause(error) },
   );
 }
 
@@ -585,6 +549,16 @@ function normalizeMaximumResponseBytes(value: number | undefined): number {
   ) {
     throw new TypeError(
       `maxResponseBytes must be an integer from 1 through ${MAX_CONFIGURED_RESPONSE_BYTES}`,
+    );
+  }
+  return resolved;
+}
+
+function normalizeRequestTimeout(value: number | undefined): number {
+  const resolved = value ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 10 * 60_000) {
+    throw new TypeError(
+      "requestTimeoutMs must be a positive safe integer no greater than ten minutes",
     );
   }
   return resolved;
@@ -630,8 +604,17 @@ function canceledRequestError(
       { service: "web", subsystem, operation: "request" },
       transportFailure(signal.reason, signal),
     ),
-    { reason: signal.reason },
+    { reason: redactedCause(signal.reason) },
   );
+}
+
+function throwIfCanceledBeforeDispatch(
+  subsystem: "search" | "fetch",
+  signal?: AbortSignal,
+): void {
+  if (signal?.aborted === true) {
+    throw canceledRequestError(subsystem, signal);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -665,6 +648,8 @@ function messageFor(contract: ModellixErrorContract): string {
       return "The Modellix Web service is temporarily unavailable";
     case "MODELLIX_BAD_REQUEST":
       return "The Modellix Web request is invalid";
+    case "MODELLIX_SUBMIT_UNKNOWN":
+      return "The paid Modellix Web request outcome is unknown; it was not retried";
     default:
       return "The Modellix Web request failed";
   }

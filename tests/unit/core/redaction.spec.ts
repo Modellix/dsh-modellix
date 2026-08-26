@@ -75,4 +75,31 @@ describe("redaction", () => {
     cyclic.self = cyclic;
     expect(redactForLog(cyclic)).toEqual({ self: "[CIRCULAR]" });
   });
+
+  it("retains hostile own property names without changing object prototypes", () => {
+    const hostile = JSON.parse(
+      '{"__proto__":{"polluted":true},"constructor":"safe","prototype":"safe"}',
+    ) as Record<string, unknown>;
+    const value = redactForLog(hostile) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+    expect(Object.hasOwn(value, "__proto__")).toBe(true);
+    expect(value.__proto__).toEqual({ polluted: true });
+    expect(value.constructor).toBe("safe");
+    expect(value.prototype).toBe("safe");
+    expect(JSON.stringify(value)).toContain('"__proto__"');
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
+
+  it("redacts hostile header names as ordinary own properties", () => {
+    const headers = JSON.parse(
+      '{"__proto__":"https://example.test/path?secret=value","authorization":"secret"}',
+    ) as Record<string, string>;
+    const value = redactHeaders(headers);
+
+    expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+    expect(Object.hasOwn(value, "__proto__")).toBe(true);
+    expect(value.__proto__).toBe("https://example.test/path");
+    expect(value.authorization).toBe(REDACTED);
+  });
 });

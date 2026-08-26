@@ -22,7 +22,17 @@ import {
   type StoragePort,
   type UiField,
 } from "../design/index.js";
-import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
+import {
+  DESIGN_JSON_LIMITS,
+  DESIGN_WIRE_LIMITS,
+} from "../shared/design-wire-limits.js";
+import { inspectJsonBudget } from "../shared/json-budget.js";
+import type {
+  DesignDiagnosticCode,
+  DesignFieldDisabledCode,
+  DesignModelUnavailableCode,
+  DesignNoticeCode,
+} from "../shared/design-presentation-codes.js";
 
 const DESIGN_CATEGORIES = ["image", "video", "audio"] as const;
 const MODEL_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -64,13 +74,23 @@ interface DesignProposalState {
   readonly baseParametersHash: string;
 }
 
+interface DesignProposalInput {
+  readonly sessionId: string;
+  readonly modelId: string;
+  readonly instruction: string;
+  readonly draftRevision: number;
+  readonly irContractHash: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+}
+
 interface DesignSessionState {
   selectedModelId: string | null;
   draft: DesignDraftState | null;
   proposal: DesignProposalState | null;
-  notice: string | null;
+  notice: DesignNoticeCode | null;
   touchedAt: number;
   nextDraftRevision: number;
+  proposalInFlight: boolean;
 }
 
 interface DesignModelWire {
@@ -79,7 +99,7 @@ interface DesignModelWire {
   readonly kind: "image" | "video" | "audio" | "unknown";
   readonly featured: boolean;
   readonly available: boolean;
-  readonly unavailableReason: string | null;
+  readonly unavailableReason: DesignModelUnavailableCode | null;
 }
 
 interface DesignFieldWire {
@@ -94,7 +114,7 @@ interface DesignFieldWire {
   readonly maximum: number | null;
   readonly step: number | null;
   readonly maxLength: number | null;
-  readonly disabledReason: string | null;
+  readonly disabledReason: DesignFieldDisabledCode | null;
 }
 
 interface DesignProposalChangeWire {
@@ -141,12 +161,11 @@ export interface DesignSnapshotWire {
       readonly expiresAt: string | null;
     }[];
     readonly diagnostic: {
-      readonly code: string;
-      readonly message: string;
+      readonly code: DesignDiagnosticCode;
       readonly retryable: boolean;
     } | null;
   }[];
-  readonly notice: string | null;
+  readonly notice: DesignNoticeCode | null;
 }
 
 /** Stateful Host facade over pure Design contracts; no Secret crosses its wire. */
@@ -163,7 +182,7 @@ export class DesignHostController {
   readonly #cache = new MemoryCache();
   readonly #sessions = new Map<string, DesignSessionState>();
   #lastModels: readonly DesignModelWire[] = [];
-  #catalogNotice: string | null = null;
+  #catalogNotice: DesignNoticeCode | null = null;
   #catalogCredentialEpoch: number | null = null;
   #pollCursor = 0;
 
@@ -264,9 +283,7 @@ export class DesignHostController {
           session.notice = null;
         } catch (error) {
           session.draft = null;
-          session.notice = error instanceof DesignError
-            ? error.message
-            : "The suggested model schema is temporarily unavailable.";
+          session.notice = schemaNoticeCode(error);
         }
       }
     }
@@ -308,16 +325,31 @@ export class DesignHostController {
     return this.#snapshot(session, models);
   }
 
-  private async propose(input: {
-    readonly sessionId: string;
-    readonly modelId: string;
-    readonly instruction: string;
-    readonly draftRevision: number;
-    readonly irContractHash: string;
-    readonly parameters: Readonly<Record<string, unknown>>;
-  }, signal?: AbortSignal): Promise<DesignSnapshotWire> {
+  private async propose(
+    input: DesignProposalInput,
+    signal?: AbortSignal,
+  ): Promise<DesignSnapshotWire> {
     if (!this.#isEnabled()) throw new DesignError("INVALID_ARGUMENT", "Design is disabled");
     const session = this.#session(input.sessionId);
+    if (session.proposalInFlight || session.proposal !== null) {
+      throw new DesignError(
+        "INVALID_ARGUMENT",
+        "A Design proposal is already pending review",
+      );
+    }
+    session.proposalInFlight = true;
+    try {
+      return await this.proposeOnce(session, input, signal);
+    } finally {
+      session.proposalInFlight = false;
+    }
+  }
+
+  private async proposeOnce(
+    session: DesignSessionState,
+    input: DesignProposalInput,
+    signal?: AbortSignal,
+  ): Promise<DesignSnapshotWire> {
     const models = await this.#loadModelsSafely(signal);
     const selected = models.find((model) => model.id === input.modelId);
     if (selected === undefined || !selected.available) {
@@ -487,11 +519,27 @@ export class DesignHostController {
       });
     } catch (error) {
       if (error instanceof DesignError && error.code === "SUBMIT_UNKNOWN") {
-        await this.#repository.markSubmitUnknown(requestId);
+        try {
+          await this.#repository.markSubmitUnknown(requestId);
+        } catch {
+          // The durable submit intent is already the conservative replay
+          // fence. A failed follow-up annotation must never replace the paid
+          // request's non-replayable domain outcome.
+        }
       } else {
-        await this.#repository.markSubmitRejected(requestId);
+        try {
+          await this.#repository.markSubmitRejected(requestId);
+        } catch {
+          // Leave the persisted intent conservative when storage is degraded;
+          // the authoritative upstream rejection still belongs to the caller.
+        }
       }
-      await this.#markUnauthorized(error, credential.credentialEpoch);
+      try {
+        await this.#markUnauthorized(error, credential.credentialEpoch);
+      } catch {
+        // Credential-state notification is secondary and must not replace the
+        // original paid submission decision.
+      }
       throw error;
     }
     try {
@@ -512,7 +560,11 @@ export class DesignHostController {
           // A committed accepted event makes this transition invalid; a fully
           // unavailable store leaves the original intent as the recovery fence.
         }
-        throw firstPersistenceError;
+        throw new DesignError(
+          "SUBMIT_UNKNOWN",
+          "The paid request succeeded but its task could not be persisted",
+          { cause: firstPersistenceError },
+        );
       }
     }
     return this.#snapshot(session, await this.#loadModelsSafely(signal));
@@ -551,8 +603,8 @@ export class DesignHostController {
     } catch (error) {
       if (signal?.aborted === true) throw error;
       this.#catalogNotice = this.#lastModels.length > 0
-        ? "The live model catalog could not be refreshed; showing the last in-memory result."
-        : "The Modellix Design model catalog is temporarily unavailable.";
+        ? "catalog-stale"
+        : "catalog-unavailable";
       return this.#lastModels;
     }
   }
@@ -648,6 +700,7 @@ export class DesignHostController {
       notice: null,
       touchedAt: this.#now(),
       nextDraftRevision: 0,
+      proposalInFlight: false,
     };
     this.#sessions.set(sessionId, created);
     return created;
@@ -671,7 +724,7 @@ export class DesignHostController {
       session.selectedModelId = null;
       session.draft = null;
       session.proposal = null;
-      session.notice = "The Modellix credential changed; the Design model and parameters were reloaded.";
+      session.notice = "credential-reloaded";
     }
   }
 }
@@ -717,14 +770,7 @@ function parseModelPayload(payload: unknown): { readonly sessionId: string; read
   return { sessionId: safeSessionId(input.sessionId), modelId: safeModelId(input.modelId) };
 }
 
-function parseProposalPayload(payload: unknown): {
-  readonly sessionId: string;
-  readonly modelId: string;
-  readonly instruction: string;
-  readonly draftRevision: number;
-  readonly irContractHash: string;
-  readonly parameters: Readonly<Record<string, unknown>>;
-} {
+function parseProposalPayload(payload: unknown): DesignProposalInput {
   const input = record(payload);
   if (typeof input.instruction !== "string" || input.instruction.length > 64 * 1024) {
     throw new DesignError("INVALID_ARGUMENT", "Design instruction is invalid");
@@ -735,7 +781,7 @@ function parseProposalPayload(payload: unknown): {
     instruction: input.instruction,
     draftRevision: natural(input.draftRevision, "draftRevision"),
     irContractHash: safeHash(input.irContractHash),
-    parameters: record(input.parameters),
+    parameters: parameterRecord(input.parameters),
   };
 }
 
@@ -745,7 +791,7 @@ function parseApplyProposalPayload(payload: unknown): {
   readonly parameters: Readonly<Record<string, unknown>>;
 } {
   const input = parseProposalMutationPayload(payload);
-  return { ...input, parameters: record(record(payload).parameters) };
+  return { ...input, parameters: parameterRecord(record(payload).parameters) };
 }
 
 function parseProposalMutationPayload(payload: unknown): {
@@ -772,7 +818,7 @@ function parseSubmitPayload(payload: unknown): {
     modelId: safeModelId(input.modelId),
     draftRevision: natural(input.draftRevision, "draftRevision"),
     irContractHash: safeHash(input.irContractHash),
-    parameters: record(input.parameters),
+    parameters: parameterRecord(input.parameters),
   };
 }
 
@@ -862,7 +908,7 @@ function fieldWire(field: UiField): DesignFieldWire {
     maximum: field.constraints.maximum,
     step: kind === "integer" ? 1 : null,
     maxLength: field.constraints.maxLength,
-    disabledReason: field.kind === "unknown" ? "This field requires JSON input." : null,
+    disabledReason: field.kind === "unknown" ? "unsupported-schema-field" : null,
   };
 }
 
@@ -928,25 +974,21 @@ function taskWire(
   } else if (credentialMismatch) {
     diagnostic = {
       code: "credential-changed",
-      message: "This generation belongs to an earlier credential and cannot be refreshed.",
       retryable: false,
     };
   } else if (status === "submit-unknown") {
     diagnostic = {
       code: "submit-unknown",
-      message: "The generation outcome is unknown.",
       retryable: false,
     };
   } else if (status === "failed") {
     diagnostic = {
       code: "generation-failed",
-      message: "The generation was not completed.",
       retryable: false,
     };
   } else if (status === "succeeded" && resources.length === 0) {
     diagnostic = {
       code: "result-unavailable",
-      message: "The generation completed without a usable output resource.",
       retryable: false,
     };
   }
@@ -965,6 +1007,16 @@ function circularSlice<T>(items: readonly T[], start: number, limit: number): re
   if (items.length === 0) return [];
   const count = Math.min(items.length, limit);
   return Array.from({ length: count }, (_, offset) => items[(start + offset) % items.length] as T);
+}
+
+function schemaNoticeCode(error: unknown): DesignNoticeCode {
+  if (
+    error instanceof DesignError &&
+    (error.code === "SCHEMA_INVALID" || error.code === "ENDPOINT_NOT_ALLOWED")
+  ) {
+    return "schema-invalid";
+  }
+  return "schema-unavailable";
 }
 
 function classifyPollFailure(
@@ -1011,15 +1063,15 @@ function pollDiagnosticWire(
 ): NonNullable<DesignSnapshotWire["jobs"][number]["diagnostic"]> {
   switch (code) {
     case "credential-rejected":
-      return { code, message: "The Modellix credential was rejected while refreshing this task.", retryable: false };
+      return { code, retryable: false };
     case "task-inaccessible":
-      return { code, message: "This generation task is no longer accessible.", retryable: false };
+      return { code, retryable: false };
     case "rate-limited":
-      return { code, message: "Task refresh is rate limited and will resume later.", retryable: true };
+      return { code, retryable: true };
     case "response-invalid":
-      return { code, message: "The task response could not be understood.", retryable: !blocked };
+      return { code, retryable: !blocked };
     case "poll-unavailable":
-      return { code, message: "Task refresh is temporarily unavailable and will resume later.", retryable: true };
+      return { code, retryable: true };
   }
 }
 
@@ -1062,7 +1114,7 @@ function ensureSelectedModel(
     kind: "unknown",
     featured: false,
     available: false,
-    unavailableReason: "The selected model is no longer in the current catalog.",
+    unavailableReason: "removed-from-catalog",
   };
   return [unavailable, ...models].slice(0, 1_000);
 }
@@ -1120,6 +1172,28 @@ function record(value: unknown): Record<string, unknown> {
     throw new DesignError("INVALID_ARGUMENT", "Design payload must be an object");
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * Enforces the closed Client/Host JSON budget before parameter-planner code
+ * recursively clones or converts caller-controlled values. Byte accounting is
+ * incremental so an oversized string does not require a second large buffer.
+ */
+function parameterRecord(value: unknown): Readonly<Record<string, unknown>> {
+  const parameters = record(value);
+  switch (inspectJsonBudget(parameters, DESIGN_JSON_LIMITS)) {
+    case "bytes":
+      throw new DesignError("INVALID_ARGUMENT", "Design parameters exceed the JSON byte budget");
+    case "depth":
+    case "nodes":
+      throw new DesignError("INVALID_ARGUMENT", "Design parameters exceed the JSON structural budget");
+    case "cycle":
+      throw new DesignError("INVALID_ARGUMENT", "Design parameters must not contain cycles");
+    case "non-json":
+      throw new DesignError("INVALID_ARGUMENT", "Design parameters must contain only JSON values");
+    case null:
+      return parameters;
+  }
 }
 
 function jsonEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {

@@ -258,8 +258,8 @@ describe("Modellix native Web providers", () => {
     [401, "MODELLIX_API_KEY_INVALID"],
     [402, "MODELLIX_BILLING_BLOCKED"],
     [429, "MODELLIX_RATE_LIMITED"],
-    [500, "MODELLIX_SERVER_ERROR"],
-    [503, "MODELLIX_SERVER_ERROR"],
+    [500, "MODELLIX_SUBMIT_UNKNOWN"],
+    [503, "MODELLIX_SUBMIT_UNKNOWN"],
   ] as const)("classifies HTTP %i without retrying", async (status, code) => {
     const harness = createHarness(async () => errorResponse(status));
     const { search } = createModellixWebProviders(harness.options);
@@ -271,6 +271,21 @@ describe("Modellix native Web providers", () => {
     expect(harness.fetchCalls).toHaveLength(1);
     expect(harness.rejected).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
   });
+
+  it.each([201, 202, 204, 299])(
+    "classifies a noncanonical paid HTTP %i success as unknown without retrying",
+    async (status) => {
+      const harness = createHarness(async () => new Response(null, { status }));
+      const { search } = createModellixWebProviders(harness.options);
+
+      const error = await search
+        .search({ query: "query", maxResults: 5 })
+        .catch((caught: unknown) => caught);
+      expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+      expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
+      expect(harness.fetchCalls).toHaveLength(1);
+    },
+  );
 
   it("preserves Retry-After as structured 429 metadata", async () => {
     const harness = createHarness(async () =>
@@ -313,12 +328,46 @@ describe("Modellix native Web providers", () => {
     const error = await search
       .search({ query: "query", maxResults: 5 })
       .catch((caught: unknown) => caught);
-    expectProviderError(error, "MODELLIX_OFFLINE");
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
     expect((error as Error).message).not.toContain("Bearer");
     expect(JSON.stringify((error as ModellixWebProviderError).diagnostic)).not.toContain(
       "should-never-be-reflected",
     );
     expect(harness.fetchCalls).toHaveLength(1);
+  });
+
+  it("never reflects a non-Error transport rejection in diagnostics", async () => {
+    const sentinel = "SENTINEL_NON_ERROR_TRANSPORT_SECRET";
+    const harness = createHarness(async () => {
+      throw sentinel;
+    });
+    const { search } = createModellixWebProviders(harness.options);
+
+    const error = await search
+      .search({ query: "query", maxResults: 5 })
+      .catch((caught: unknown) => caught);
+
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect(JSON.stringify((error as ModellixWebProviderError).diagnostic))
+      .not.toContain(sentinel);
+    expect(harness.fetchCalls).toHaveLength(1);
+  });
+
+  it("preserves an unknown paid Fetch outcome and never replays its POST", async () => {
+    const harness = createHarness(async () => {
+      throw new Error("connection reset after the request may have been accepted");
+    });
+    const { fetch } = createModellixWebProviders(harness.options);
+
+    const error = await fetch
+      .fetch({ url: "https://example.com/article" })
+      .catch((caught: unknown) => caught);
+
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
+    expect(harness.fetchCalls).toHaveLength(1);
+    expect(harness.fetchCalls[0]?.init?.method).toBe("POST");
   });
 
   it("does not let a stale 401 invalidate a newer Credential epoch", async () => {
@@ -339,19 +388,29 @@ describe("Modellix native Web providers", () => {
     expect(harness.rejected).not.toHaveBeenCalled();
   });
 
-  it("rejects every credential-bearing redirect and never follows it", async () => {
-    const harness = createHarness(async () =>
-      new Response(null, {
-        status: 302,
-        headers: { location: "https://attacker.invalid/collect" },
-      }),
-    );
+  it.each([
+    ["3xx", () => new Response(null, {
+      status: 302,
+      headers: { location: "https://attacker.invalid/collect" },
+    })],
+    ["status zero", () => Response.error()],
+    ["redirected", () => {
+      const response = new Response(null, { status: 200 });
+      Object.defineProperty(response, "redirected", { value: true });
+      return response;
+    }],
+  ] as const)("classifies a post-dispatch %s response as unknown and never follows it", async (
+    _case,
+    response,
+  ) => {
+    const harness = createHarness(async () => response());
     const { search } = createModellixWebProviders(harness.options);
 
     const error = await search
       .search({ query: "query", maxResults: 5 })
       .catch((caught: unknown) => caught);
-    expectProviderError(error, "MODELLIX_UNEXPECTED_RESPONSE");
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
     expect(harness.fetchCalls).toHaveLength(1);
     expect(harness.fetchCalls[0]?.init?.redirect).toBe("manual");
   });
@@ -376,7 +435,20 @@ describe("Modellix native Web providers", () => {
     const error = await search
       .search({ query: "query", maxResults: 5 })
       .catch((caught: unknown) => caught);
-    expectProviderError(error, "MODELLIX_UNEXPECTED_RESPONSE");
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
+  });
+
+  it("classifies a malformed paid Fetch success as unknown without replaying it", async () => {
+    const harness = createHarness(async () => jsonResponse({ results: [] }));
+    const { fetch } = createModellixWebProviders(harness.options);
+
+    const error = await fetch
+      .fetch({ url: "https://example.com/article" })
+      .catch((caught: unknown) => caught);
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
+    expect(harness.fetchCalls).toHaveLength(1);
   });
 
   it("stops reading a response that exceeds the configured byte boundary", async () => {
@@ -396,7 +468,8 @@ describe("Modellix native Web providers", () => {
     const error = await search
       .search({ query: "query", maxResults: 5 })
       .catch((caught: unknown) => caught);
-    expectProviderError(error, "MODELLIX_UNEXPECTED_RESPONSE");
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
     expect(harness.fetchCalls).toHaveLength(1);
   });
 
@@ -414,7 +487,8 @@ describe("Modellix native Web providers", () => {
     const error = await search
       .search({ query: "query", maxResults: 5 })
       .catch((caught: unknown) => caught);
-    expectProviderError(error, "MODELLIX_UNEXPECTED_RESPONSE");
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
     expect(harness.fetchCalls).toHaveLength(1);
   });
 
@@ -429,7 +503,30 @@ describe("Modellix native Web providers", () => {
     expectProviderError(preflightError, "MODELLIX_CANCELED", null);
     expect(preflightHarness.fetchCalls).toHaveLength(0);
 
+    const resolvingHarness = createHarness(async () => jsonResponse(searchEnvelope()));
+    let resolveCredential!: (value: { apiKey: string; credentialEpoch: number }) => void;
+    resolvingHarness.resolveCredential.mockImplementation(() =>
+      new Promise((resolve) => {
+        resolveCredential = resolve;
+      }));
+    const resolving = createModellixWebProviders(resolvingHarness.options).search;
+    const resolvingController = new AbortController();
+    const resolvingPending = resolving.search(
+      { query: "query", maxResults: 5 },
+      resolvingController.signal,
+    );
+    resolvingController.abort();
+    resolveCredential({ apiKey: "test-key-only", credentialEpoch: 7 });
+    const resolvingError = await resolvingPending.catch((caught: unknown) => caught);
+    expectProviderError(resolvingError, "MODELLIX_CANCELED", null);
+    expect(resolvingHarness.fetchCalls).toHaveLength(0);
+
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      markFetchStarted = resolve;
+    });
     const inFlightHarness = createHarness(async (_call, _input, init) => {
+      markFetchStarted();
       if (init?.signal?.aborted === true) {
         throw new DOMException("aborted", "AbortError");
       }
@@ -448,10 +545,29 @@ describe("Modellix native Web providers", () => {
       { query: "query", maxResults: 5 },
       inFlightController.signal,
     );
+    await fetchStarted;
     inFlightController.abort();
     const inFlightError = await pending.catch((caught: unknown) => caught);
-    expectProviderError(inFlightError, "MODELLIX_CANCELED");
+    expectProviderError(inFlightError, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((inFlightError as ModellixWebProviderError).contract.retryable).toBe(false);
     expect(inFlightHarness.fetchCalls).toHaveLength(1);
+  });
+
+  it("times out a stalled paid request once without replaying it", async () => {
+    const harness = createHarness(async (_call, _input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      }), { requestTimeoutMs: 5 });
+    const { search } = createModellixWebProviders(harness.options);
+
+    const error = await search
+      .search({ query: "query", maxResults: 5 })
+      .catch((caught: unknown) => caught);
+    expectProviderError(error, "MODELLIX_SUBMIT_UNKNOWN");
+    expect((error as ModellixWebProviderError).contract.retryable).toBe(false);
+    expect(harness.fetchCalls).toHaveLength(1);
   });
 
   it("blocks invalid local input and switch/key races before a paid POST", async () => {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { inspectJsonBudget } from "../shared/json-budget.js";
 import { DesignError } from "./errors.js";
 
 export type JsonPrimitive = null | boolean | number | string;
@@ -101,6 +102,12 @@ const DEFAULT_LIMITS = Object.freeze({
   maxRefDepth: 64,
 });
 
+// Parsing walks the Schema graph more than once (cycle detection, reference
+// expansion, then field compilation). Keeping this proportional to maxNodes
+// allows ordinary schemas to complete while bounding compact shared-reference
+// DAGs whose expanded walk would otherwise grow exponentially.
+const MAX_TRAVERSAL_OPERATIONS_PER_NODE = 8;
+
 const ANNOTATION_KEYS = new Set([
   "$id",
   "$schema",
@@ -173,6 +180,8 @@ interface ParserContext {
   readonly limits: Required<SchemaParserLimits>;
   readonly blockedRefs: Set<string>;
   nodes: number;
+  traversalOperations: number;
+  traversalBudgetExceeded: boolean;
 }
 
 interface DiscoveredBody {
@@ -189,21 +198,36 @@ export function parseDesignSchema(
     throw new DesignError("SCHEMA_INVALID", "Schema input must be an object");
   }
   const normalizedLimits = normalizeLimits(limits);
-  let documentJson: string;
-  try {
-    documentJson = stableStringify(document);
-  } catch (cause) {
-    throw new DesignError("SCHEMA_INVALID", "Schema input is not JSON-compatible", {
-      cause,
-    });
+  // The full OpenAPI wrapper receives a generous non-recursive safety bound;
+  // the configured schema depth/node limits are applied to the discovered
+  // request body below, so wrapper metadata does not consume model capacity.
+  switch (inspectJsonBudget(document, {
+    maxBytes: normalizedLimits.maxBytes,
+    maxDepth: normalizedLimits.maxDepth + normalizedLimits.maxRefDepth,
+    maxNodes: 100_000,
+  })) {
+    case "bytes":
+      throw new DesignError(
+        "SCHEMA_INVALID",
+        `Schema input exceeds the ${normalizedLimits.maxBytes}-byte limit`,
+      );
+    case "depth":
+      throw new DesignError(
+        "SCHEMA_INVALID",
+        "Schema document exceeds the structural depth safety limit",
+      );
+    case "nodes":
+      throw new DesignError(
+        "SCHEMA_INVALID",
+        "Schema document exceeds the structural node safety limit",
+      );
+    case "cycle":
+      throw new DesignError("SCHEMA_INVALID", "Schema input contains a cycle");
+    case "non-json":
+      throw new DesignError("SCHEMA_INVALID", "Schema input is not JSON-compatible");
+    case null:
+      break;
   }
-  if (new TextEncoder().encode(documentJson).byteLength > normalizedLimits.maxBytes) {
-    throw new DesignError(
-      "SCHEMA_INVALID",
-      `Schema input exceeds the ${normalizedLimits.maxBytes}-byte limit`,
-    );
-  }
-
   const diagnostics: SchemaDiagnostic[] = [];
   const discovered = discoverPostBody(document, diagnostics);
   if (discovered === null) {
@@ -232,18 +256,31 @@ export function parseDesignSchema(
     limits: normalizedLimits,
     blockedRefs: new Set(),
     nodes: 0,
+    traversalOperations: 0,
+    traversalBudgetExceeded: false,
   };
-  if (rawSchemaBudgetExceeded(discovered.schema, context)) {
-    return {
-      version: 1,
-      method: "POST",
-      operationPath: discovered.operationPath,
-      fields: [],
-      primaryPromptPath: null,
-      schemaHash: sha256(stableStringify(discovered.schema)),
-      diagnostics,
-      supported: false,
-    };
+  switch (inspectJsonBudget(discovered.schema, normalizedLimits)) {
+    case "depth":
+      throw new DesignError(
+        "SCHEMA_INVALID",
+        `Schema input exceeds the ${normalizedLimits.maxDepth}-level depth limit`,
+      );
+    case "nodes":
+      throw new DesignError(
+        "SCHEMA_INVALID",
+        `Schema input exceeds the ${normalizedLimits.maxNodes}-node limit`,
+      );
+    case "bytes":
+      throw new DesignError(
+        "SCHEMA_INVALID",
+        `Schema input exceeds the ${normalizedLimits.maxBytes}-byte limit`,
+      );
+    case "cycle":
+      throw new DesignError("SCHEMA_INVALID", "Schema input contains a cycle");
+    case "non-json":
+      throw new DesignError("SCHEMA_INVALID", "Schema input is not JSON-compatible");
+    case null:
+      break;
   }
   detectReferenceCycles(discovered.schema, "#", context, [], 0);
   const root = expandSchema(discovered.schema, "#", context, [], 0);
@@ -320,8 +357,8 @@ function discoverPostBody(
         code: "MULTIPLE_POST_OPERATIONS",
         path: "#/paths",
         keyword: "post",
-        blocking: false,
-        message: "Multiple POST bodies were found; the first path in lexical order was selected",
+        blocking: true,
+        message: "Multiple POST bodies were found; Design cannot safely select a paid operation",
       });
     }
     if (candidates[0] !== undefined) {
@@ -525,6 +562,9 @@ function expandSchema(
   refStack: readonly string[],
   depth: number,
 ): Readonly<Record<string, unknown>> {
+  if (!consumeTraversalOperation(path, context)) {
+    return {};
+  }
   if (depth > context.limits.maxDepth) {
     addBudgetDiagnostic(path, "maximum schema depth", context);
     return {};
@@ -618,6 +658,9 @@ function detectReferenceCycles(
   refStack: readonly string[],
   depth: number,
 ): void {
+  if (!consumeTraversalOperation(path, context)) {
+    return;
+  }
   if (depth > context.limits.maxDepth + context.limits.maxRefDepth) {
     return;
   }
@@ -682,6 +725,16 @@ function detectReferenceCycles(
       }
     });
   }
+}
+
+function consumeTraversalOperation(path: string, context: ParserContext): boolean {
+  if (context.traversalBudgetExceeded) return false;
+  context.traversalOperations += 1;
+  const maximum = context.limits.maxNodes * MAX_TRAVERSAL_OPERATIONS_PER_NODE;
+  if (context.traversalOperations <= maximum) return true;
+  context.traversalBudgetExceeded = true;
+  addBudgetDiagnostic(path, "maximum schema traversal operation count", context);
+  return false;
 }
 
 function mergeSchemas(
@@ -866,10 +919,31 @@ function inferKind(schema: Readonly<Record<string, unknown>>, key: string): UiFi
   if (asRecord(schema.items) !== null) {
     return "array";
   }
+  // Some Modellix schemas omit `type` for a scalar field while still
+  // publishing a concrete default (for example, Grok Voice `voice_id`).
+  // Treating that field as wholly unknown makes the authoritative default
+  // impossible to submit. Inferring only scalar defaults is conservative: the
+  // UI accepts a strict subset of the unconstrained JSON Schema value space,
+  // while objects and arrays without their own schema remain fail-closed.
+  if (Object.hasOwn(schema, "default")) {
+    const defaultKind = scalarKind(schema.default);
+    if (defaultKind !== null) {
+      return defaultKind;
+    }
+  }
   if (/prompt/iu.test(key)) {
     return "string";
   }
   return "unknown";
+}
+
+function scalarKind(value: unknown): UiFieldKind | null {
+  if (typeof value === "string") return "string";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isInteger(value) ? "integer" : "number";
+  }
+  return null;
 }
 
 function detectMediaKind(
@@ -935,52 +1009,51 @@ function readConstraints(
   };
 }
 
-function rawSchemaBudgetExceeded(
-  schema: Readonly<Record<string, unknown>>,
-  context: ParserContext,
-): boolean {
-  let nodes = 0;
-  let exceeded = false;
-  const visit = (value: unknown, depth: number): void => {
-    if (exceeded) {
-      return;
-    }
-    nodes += 1;
-    if (nodes > context.limits.maxNodes) {
-      addBudgetDiagnostic("#", "maximum raw schema node count", context);
-      exceeded = true;
-      return;
-    }
-    if (depth > context.limits.maxDepth) {
-      addBudgetDiagnostic("#", "maximum raw schema depth", context);
-      exceeded = true;
-      return;
-    }
-    if (Array.isArray(value)) {
-      value.forEach((item) => visit(item, depth + 1));
-      return;
-    }
-    const object = asRecord(value);
-    if (object !== null) {
-      Object.values(object).forEach((item) => visit(item, depth + 1));
-    }
-  };
-  visit(schema, 0);
-  return exceeded;
-}
-
 function safePattern(value: unknown): string | null {
   return typeof value === "string" && value.length <= 512 ? value : null;
 }
 
 function isSafeRegularExpression(pattern: string): boolean {
-  if (
-    /\\[1-9]/u.test(pattern) ||
-    pattern.includes("(?<=") ||
-    pattern.includes("(?<!") ||
-    /\([^)]*(?:[+*]|\{\d+(?:,\d*)?\})[^)]*\)(?:[+*]|\{\d+(?:,\d*)?\})/u.test(pattern)
-  ) {
+  // JavaScript RegExp has no execution deadline. Accept only an anchored,
+  // group-free subset with at most one variable quantifier so an untrusted
+  // Schema cannot introduce catastrophic or high-polynomial backtracking.
+  if (!pattern.startsWith("^") || !pattern.endsWith("$") || pattern.length < 2) {
     return false;
+  }
+  let index = 1;
+  let variableQuantifiers = 0;
+  const end = pattern.length - 1;
+  while (index < end) {
+    const character = pattern[index]!;
+    if ("()|^$*+?{}".includes(character)) return false;
+    if (character === "[") {
+      index = characterClassEnd(pattern, index + 1, end);
+      if (index < 0) return false;
+    } else if (character === "\\") {
+      const escaped = pattern[index + 1];
+      if (
+        escaped === undefined ||
+        /[0-9ckpPux]/u.test(escaped)
+      ) return false;
+      index += 2;
+    } else {
+      index += 1;
+    }
+
+    const quantifier = pattern[index];
+    if (quantifier === "*" || quantifier === "+" || quantifier === "?") {
+      variableQuantifiers += 1;
+      index += 1;
+    } else if (quantifier === "{") {
+      const close = pattern.indexOf("}", index + 1);
+      if (close < 0 || close >= end) return false;
+      const body = pattern.slice(index + 1, close);
+      const match = /^(\d+)(?:,(\d*))?$/u.exec(body);
+      if (match === null) return false;
+      if (body.includes(",")) variableQuantifiers += 1;
+      index = close + 1;
+    }
+    if (variableQuantifiers > 1) return false;
   }
   try {
     void new RegExp(pattern, "u");
@@ -988,6 +1061,22 @@ function isSafeRegularExpression(pattern: string): boolean {
   } catch {
     return false;
   }
+}
+
+function characterClassEnd(pattern: string, start: number, end: number): number {
+  let index = start;
+  if (pattern[index] === "^") index += 1;
+  while (index < end) {
+    if (pattern[index] === "\\") {
+      const escaped = pattern[index + 1];
+      if (escaped === undefined || /[0-9ckpPux]/u.test(escaped)) return -1;
+      index += 2;
+      continue;
+    }
+    if (pattern[index] === "]") return index + 1;
+    index += 1;
+  }
+  return -1;
 }
 
 function schemaTypes(schema: Readonly<Record<string, unknown>>): string[] {
@@ -1022,31 +1111,57 @@ function jsonType(value: unknown): string {
 
 function sortFields(fields: readonly UiField[]): UiField[] {
   return [...fields].sort((left, right) => {
-    const promptDelta = Number(isPromptField(right)) - Number(isPromptField(left));
-    if (promptDelta !== 0) {
-      return promptDelta;
+    const leftPriority = primaryInputPriority(left) ?? Number.POSITIVE_INFINITY;
+    const rightPriority = primaryInputPriority(right) ?? Number.POSITIVE_INFINITY;
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
     }
     const requiredDelta = Number(right.required) - Number(left.required);
     return requiredDelta;
   });
 }
 
-function isPromptField(field: UiField): boolean {
+function primaryInputPriority(field: UiField): number | null {
+  if (field.kind !== "string") return null;
   const normalized = field.key.toLowerCase();
-  return normalized === "prompt" || normalized.endsWith("_prompt");
+  if (normalized === "prompt" && !field.hasConst) return 0;
+  // These fallbacks are accepted only as explicit, required, non-null text
+  // inputs. This supports TTS/script generation without promoting arbitrary
+  // strings (or optional ASR metadata) to the primary generation input.
+  if (field.required && !field.nullable && !field.hasConst) {
+    if (normalized === "text") return 1;
+    if (normalized === "input_text") return 2;
+    if (normalized === "script") return 3;
+  }
+  if (
+    normalized.endsWith("_prompt") &&
+    !field.hasConst &&
+    !NON_PRIMARY_PROMPT_KEYS.has(normalized)
+  ) return 4;
+  return null;
 }
 
+const NON_PRIMARY_PROMPT_KEYS = new Set([
+  "negative_prompt",
+  "reference_prompt",
+  "speaker_prompt",
+  "system_prompt",
+  "voice_prompt",
+]);
+
 function findPrimaryPrompt(fields: readonly UiField[]): string | null {
-  for (const field of fields) {
-    if (isPromptField(field) && field.kind === "string") {
-      return field.path;
+  let selectedPath: string | null = null;
+  let selectedPriority = Number.POSITIVE_INFINITY;
+  const visit = (field: UiField): void => {
+    const priority = primaryInputPriority(field);
+    if (priority !== null && priority < selectedPriority) {
+      selectedPath = field.path;
+      selectedPriority = priority;
     }
-    const nested = findPrimaryPrompt(field.properties);
-    if (nested !== null) {
-      return nested;
-    }
-  }
-  return null;
+    field.properties.forEach(visit);
+  };
+  fields.forEach(visit);
+  return selectedPath;
 }
 
 function invalidProperty(

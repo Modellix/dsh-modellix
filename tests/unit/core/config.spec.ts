@@ -239,24 +239,34 @@ describe("core config", () => {
 
   it("persists and resolves a bounded non-secret LLM materialization marker", () => {
     const operationId = "llm_materialization_1234";
+    const previousHash = "a".repeat(64);
+    const targetHash = "b".repeat(64);
+    const targetRouteOwnership = {
+      ownership: "created" as const,
+      appliedRouteFingerprint: targetHash,
+      entries: [{
+        kind: "model" as const,
+        key: "openai/gpt-5.6-sol",
+        appliedFingerprint: targetHash,
+      }],
+    };
     const started = beginLlmMaterialization(createDefaultConfig(), {
       operationId,
       startedAt: 5_000,
       expectedLlmSettingsRevision: 17,
+      previousRouteFingerprint: previousHash,
+      targetRouteOwnership,
     });
     expect(started.llmOwnership.materializationRecovery).toEqual({
       operationId,
       startedAt: 5_000,
       expectedLlmSettingsRevision: 17,
+      previousRouteFingerprint: previousHash,
+      targetRouteOwnership,
     });
     expect(JSON.stringify(started)).not.toContain("apiKey");
 
-    const hash = "b".repeat(64);
-    const completed = completeLlmMaterialization(started, operationId, {
-      ownership: "created",
-      appliedRouteFingerprint: hash,
-      entries: [{ kind: "model", key: "openai/gpt-5.6-sol", appliedFingerprint: hash }],
-    });
+    const completed = completeLlmMaterialization(started, operationId);
     expect(completed.llmOwnership.materializationRecovery).toBeNull();
     expect(completed.llmOwnership.route.ownership).toBe("created");
 
@@ -265,16 +275,45 @@ describe("core config", () => {
     expect(abandoned.llmOwnership.route.ownership).toBe("none");
   });
 
-  it("drops malformed LLM materialization recovery state during migration", () => {
-    const migrated = migrateConfig({
+  it("fails closed on a present malformed LLM materialization recovery marker", () => {
+    expect(() => migrateConfig({
       llmOwnership: {
         materializationRecovery: {
           operationId: "bad id with spaces",
           startedAt: -1,
-          expectedLlmSettingsRevision: "secret-shaped-value",
+          expectedLlmSettingsRevision: "invalid-revision",
+        },
+      },
+    })).toThrow(/materializationRecovery is malformed/u);
+
+    expect(() => migrateConfig({
+      llmOwnership: { materializationRecovery: "invalid-marker" },
+    })).toThrow(/materializationRecovery is malformed/u);
+  });
+
+  it("accepts only an absent or explicit null LLM recovery marker as empty", () => {
+    expect(migrateConfig({ llmOwnership: {} }).llmOwnership.materializationRecovery).toBeNull();
+    expect(migrateConfig({
+      llmOwnership: { materializationRecovery: null },
+    }).llmOwnership.materializationRecovery).toBeNull();
+  });
+
+  it("retains a structurally valid legacy recovery marker for safe runtime blocking", () => {
+    const legacy = migrateConfig({
+      llmOwnership: {
+        materializationRecovery: {
+          operationId: "llm_legacy_recovery_1234",
+          startedAt: 6_000,
+          expectedLlmSettingsRevision: 23,
         },
       },
     });
-    expect(migrated.llmOwnership.materializationRecovery).toBeNull();
+    expect(legacy.llmOwnership.materializationRecovery).toEqual({
+      operationId: "llm_legacy_recovery_1234",
+      startedAt: 6_000,
+      expectedLlmSettingsRevision: 23,
+      previousRouteFingerprint: null,
+      targetRouteOwnership: null,
+    });
   });
 });

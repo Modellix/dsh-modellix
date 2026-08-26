@@ -10,6 +10,8 @@ import {
 } from "@deepseek-ai/dsh-tools";
 
 import { DesignError, type JsonValue as DesignJsonValue } from "../design/index.js";
+import { DESIGN_JSON_LIMITS } from "../shared/design-wire-limits.js";
+import { inspectJsonBudget } from "../shared/json-budget.js";
 import type { DesignSnapshotWire } from "./design-controller.js";
 
 export const MODELLIX_DESIGN_MODELS_TOOL = "modellix_design_models";
@@ -576,7 +578,9 @@ function projectModels(
     kind: model.kind,
     featured: model.featured,
     available: model.available,
-    ...(model.unavailableReason === null ? {} : { unavailableReason: model.unavailableReason }),
+    ...(model.unavailableReason === null
+      ? {}
+      : { unavailableReason: modelUnavailableMessage(model.unavailableReason) }),
   }));
   const draft = requestedModel === undefined ? undefined : snapshot.draft;
   return {
@@ -611,9 +615,17 @@ function normalizeGenerationInput(
   input: Readonly<Record<string, ToolJsonValue>> | undefined,
 ): Readonly<Record<string, DesignJsonValue>> {
   const source = input ?? {};
-  const byteLength = new TextEncoder().encode(JSON.stringify(source)).byteLength;
-  if (byteLength > MAX_INPUT_BYTES) {
-    throw new DesignError("INVALID_ARGUMENT", `input exceeds ${String(MAX_INPUT_BYTES)} bytes`);
+  const violation = inspectJsonBudget(source, {
+    ...DESIGN_JSON_LIMITS,
+    maxBytes: MAX_INPUT_BYTES,
+  });
+  if (violation !== null) {
+    throw new DesignError(
+      "INVALID_ARGUMENT",
+      violation === "bytes"
+        ? `input exceeds ${String(MAX_INPUT_BYTES)} bytes`
+        : "input exceeds the Design JSON structural budget",
+    );
   }
   const fields = new Set(draft.fields.map((field) => field.path));
   const parameters: Record<string, DesignJsonValue> = {};
@@ -668,7 +680,10 @@ function projectGeneration(
     jobId: job.jobId,
     resources: projectResources(job),
     ...(job.diagnostic === null ? {} : {
-      diagnostic: { code: job.diagnostic.code, message: job.diagnostic.message },
+      diagnostic: {
+        code: job.diagnostic.code,
+        message: diagnosticMessage(job.diagnostic.code),
+      },
     }),
   };
 }
@@ -682,7 +697,10 @@ function projectJob(job: DesignJob): NonNullable<ModellixDesignTaskResult["job"]
     updatedAt: job.updatedAt,
     resources: projectResources(job),
     ...(job.diagnostic === null ? {} : {
-      diagnostic: { code: job.diagnostic.code, message: job.diagnostic.message },
+      diagnostic: {
+        code: job.diagnostic.code,
+        message: diagnosticMessage(job.diagnostic.code),
+      },
     }),
   };
 }
@@ -714,7 +732,7 @@ function requireCatalogModel(snapshot: DesignSnapshotWire, modelId: string): voi
     throw new DesignError("INVALID_ARGUMENT", "The selected model is not in the current Modellix Design catalog");
   }
   if (!model.available) {
-    throw new DesignError("SCHEMA_INVALID", model.unavailableReason ?? "The selected model is unavailable");
+    throw new DesignError("SCHEMA_INVALID", "The selected model is unavailable");
   }
 }
 
@@ -810,6 +828,40 @@ function formatPreparation(value: ModellixDesignPrepareResult): string {
   const changes = value.changes.map((change) => `- ${change.path} (${change.label})`).join("\n");
   const conflicts = value.conflicts.length === 0 ? "" : `\nConflicts: ${value.conflicts.join("; ")}`;
   return `${value.summary}\n${changes || "No parameter changes were proposed."}${conflicts}\nReview and explicitly confirm before generation.`;
+}
+
+function modelUnavailableMessage(
+  code: NonNullable<DesignSnapshotWire["models"][number]["unavailableReason"]>,
+): string {
+  switch (code) {
+    case "removed-from-catalog":
+      return "The selected model is no longer in the current catalog.";
+  }
+}
+
+function diagnosticMessage(
+  code: NonNullable<DesignJob["diagnostic"]>["code"],
+): string {
+  switch (code) {
+    case "credential-changed":
+      return "This generation belongs to an earlier credential and cannot be refreshed.";
+    case "submit-unknown":
+      return "The generation outcome is unknown.";
+    case "generation-failed":
+      return "The generation was not completed.";
+    case "result-unavailable":
+      return "The generation completed without a usable output resource.";
+    case "credential-rejected":
+      return "The Modellix credential was rejected while refreshing this task.";
+    case "task-inaccessible":
+      return "This generation task is no longer accessible.";
+    case "rate-limited":
+      return "Task refresh is rate limited and will resume later.";
+    case "response-invalid":
+      return "The task response could not be understood.";
+    case "poll-unavailable":
+      return "Task refresh is temporarily unavailable and will resume later.";
+  }
 }
 
 function formatGeneration(value: ModellixDesignGenerateResult): string {

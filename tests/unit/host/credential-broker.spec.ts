@@ -57,8 +57,11 @@ describe("CredentialBroker", () => {
   });
 
   it("rejects redirects and malformed envelopes", async () => {
+    const followed = new Response(JSON.stringify({ data: { is_valid: true } }));
+    Object.defineProperty(followed, "redirected", { value: true });
     const responses = [
       new Response(null, { status: 302, headers: { location: "https://example.test" } }),
+      followed,
       new Response("not-json"),
     ];
     const broker = new CredentialBroker({
@@ -66,6 +69,7 @@ describe("CredentialBroker", () => {
       initialCredentialEpoch: 0,
       fetch: async () => responses.shift()!,
     });
+    await expect(broker.validateCandidate("candidate-secret")).rejects.toBeInstanceOf(CredentialValidationError);
     await expect(broker.validateCandidate("candidate-secret")).rejects.toBeInstanceOf(CredentialValidationError);
     await expect(broker.validateCandidate("candidate-secret")).rejects.toBeInstanceOf(CredentialValidationError);
   });
@@ -112,6 +116,26 @@ describe("CredentialBroker", () => {
       contract: { code: "MODELLIX_CANCELED" },
     });
     expect(canceled).toBe(true);
+  });
+
+  it("times out a stalled validation request within its owned deadline", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      }));
+    const broker = new CredentialBroker({
+      credentials: credentialPort(),
+      initialCredentialEpoch: 0,
+      fetch: fetchMock,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(broker.validateCandidate("candidate-secret")).rejects.toMatchObject({
+      contract: { code: "MODELLIX_TIMEOUT" },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("serializes writes and rejects a stale plugin epoch", async () => {

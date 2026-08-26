@@ -103,7 +103,7 @@ describe("DesignPlannerClient", () => {
     });
   });
 
-  it("blocks hallucinated paths and invalid field types after structured output", async () => {
+  it("treats unusable 2xx parameter plans as a non-replayable paid outcome", async () => {
     const hallucinatedFetch = vi.fn<FetchPort>().mockResolvedValue(
       plannerResponse({
         set: [{ path: "/invented", value: true }],
@@ -113,7 +113,7 @@ describe("DesignPlannerClient", () => {
     );
     await expect(
       plan(new DesignPlannerClient({ fetch: hallucinatedFetch })),
-    ).rejects.toMatchObject({ code: "PLANNER_RESPONSE_INVALID" });
+    ).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: 200 });
     expect(hallucinatedFetch).toHaveBeenCalledOnce();
 
     const invalidTypeFetch = vi.fn<FetchPort>().mockResolvedValue(
@@ -125,8 +125,19 @@ describe("DesignPlannerClient", () => {
     );
     await expect(
       plan(new DesignPlannerClient({ fetch: invalidTypeFetch })),
-    ).rejects.toMatchObject({ code: "PLANNER_RESPONSE_INVALID" });
+    ).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: 200 });
     expect(invalidTypeFetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    new Response("not-json", { headers: { "content-type": "text/plain" } }),
+    new Response("{", { headers: { "content-type": "application/json" } }),
+  ])("treats a malformed 2xx response as submit-unknown", async (response) => {
+    const fetchMock = vi.fn<FetchPort>().mockResolvedValue(response);
+    await expect(
+      plan(new DesignPlannerClient({ fetch: fetchMock })),
+    ).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: 200 });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -134,7 +145,12 @@ describe("DesignPlannerClient", () => {
     [402, "PLANNER_BILLING_BLOCKED"],
     [403, "PLANNER_FORBIDDEN"],
     [429, "PLANNER_RATE_LIMITED"],
-    [503, "PLANNER_UNAVAILABLE"],
+    [302, "SUBMIT_UNKNOWN"],
+    [408, "SUBMIT_UNKNOWN"],
+    [409, "SUBMIT_UNKNOWN"],
+    [425, "SUBMIT_UNKNOWN"],
+    [500, "SUBMIT_UNKNOWN"],
+    [503, "SUBMIT_UNKNOWN"],
   ] as const)("maps HTTP %i without retry to %s", async (status, code) => {
     const secret = "SENTINEL_ERROR_BODY_KEY";
     const fetchMock = vi.fn<FetchPort>().mockResolvedValue(
@@ -154,13 +170,41 @@ describe("DesignPlannerClient", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it("maps timeout, cancellation, and network failures without exposing causes", async () => {
+  it("keeps a definitive non-2xx status when its untrusted body stalls", async () => {
+    const stalledBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new DOMException("body timed out", "TimeoutError"));
+      },
+    });
+    const fetchMock = vi.fn<FetchPort>().mockResolvedValue(
+      new Response(stalledBody, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(
+      plan(new DesignPlannerClient({ fetch: fetchMock })),
+    ).rejects.toMatchObject({ code: "PLANNER_UNAUTHORIZED", status: 401 });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps pre-dispatch cancellation distinct from ambiguous post-dispatch failures", async () => {
+    const preAborted = new AbortController();
+    preAborted.abort();
+    const neverCalled = vi.fn<FetchPort>();
+    await expect(plan(
+      new DesignPlannerClient({ fetch: neverCalled }),
+      preAborted.signal,
+    )).rejects.toMatchObject({ code: "PLANNER_ABORTED", status: null });
+    expect(neverCalled).not.toHaveBeenCalled();
+
     const timeoutFetch = vi
       .fn<FetchPort>()
       .mockRejectedValue(new DOMException("timed out", "TimeoutError"));
     await expect(
       plan(new DesignPlannerClient({ fetch: timeoutFetch })),
-    ).rejects.toMatchObject({ code: "PLANNER_TIMEOUT", status: null });
+    ).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: null });
     expect(timeoutFetch).toHaveBeenCalledOnce();
 
     const controller = new AbortController();
@@ -179,7 +223,7 @@ describe("DesignPlannerClient", () => {
       controller.signal,
     );
     controller.abort();
-    await expect(aborted).rejects.toMatchObject({ code: "PLANNER_ABORTED" });
+    await expect(aborted).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: null });
     expect(abortFetch).toHaveBeenCalledOnce();
 
     const causeSecret = "SENTINEL_TRANSPORT_SECRET";
@@ -189,7 +233,7 @@ describe("DesignPlannerClient", () => {
     const error = await captureError(
       plan(new DesignPlannerClient({ fetch: networkFetch })),
     );
-    expect(error).toMatchObject({ code: "PLANNER_UNAVAILABLE" });
+    expect(error).toMatchObject({ code: "SUBMIT_UNKNOWN", status: null });
     expect(String(error)).not.toContain(causeSecret);
     expect(networkFetch).toHaveBeenCalledOnce();
   });
@@ -216,7 +260,7 @@ describe("DesignPlannerClient", () => {
     );
     await expect(
       plan(new DesignPlannerClient({ fetch: responseFetch })),
-    ).rejects.toMatchObject({ code: "PLANNER_RESPONSE_INVALID" });
+    ).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: 200 });
     expect(responseFetch).toHaveBeenCalledOnce();
   });
 });

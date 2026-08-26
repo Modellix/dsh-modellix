@@ -3,6 +3,7 @@ import {
   MODELLIX_CREDENTIAL_REF,
   parseRetryAfter,
   readBoundedResponseJson,
+  requestDeadline,
   toModellixError,
   type CredentialDescriptor,
   type CredentialMutationResult,
@@ -11,6 +12,7 @@ import {
 
 const VALIDATE_URL = "https://api.modellix.ai/api/v1/apikey/validate";
 const MAX_VALIDATION_RESPONSE_BYTES = 64 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 export interface HarnessCredentialInfo {
   readonly configured: boolean;
@@ -40,6 +42,7 @@ export interface CredentialBrokerOptions {
   readonly initialCredentialEpoch: number;
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
+  readonly requestTimeoutMs?: number;
 }
 
 /** Host-only owner of candidate validation and serialized Credential writes. */
@@ -48,12 +51,21 @@ export class CredentialBroker {
   readonly #mutations: CredentialMutationCoordinator;
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: CredentialBrokerOptions) {
     this.#credentials = options.credentials;
     this.#mutations = new CredentialMutationCoordinator(options.initialCredentialEpoch);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#now = options.now ?? Date.now;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.#requestTimeoutMs) ||
+      this.#requestTimeoutMs < 1 ||
+      this.#requestTimeoutMs > 10 * 60_000
+    ) {
+      throw new TypeError("requestTimeoutMs must be a positive safe integer no greater than ten minutes");
+    }
   }
 
   get credentialEpoch(): number {
@@ -92,6 +104,7 @@ export class CredentialBroker {
 
   async validateCandidate(candidate: string, signal?: AbortSignal): Promise<void> {
     assertCandidate(candidate);
+    const deadline = requestDeadline(signal, this.#requestTimeoutMs);
     let response: Response;
     try {
       response = await this.#fetch(VALIDATE_URL, {
@@ -101,12 +114,21 @@ export class CredentialBroker {
           authorization: `Bearer ${candidate}`,
         },
         redirect: "manual",
-        ...(signal === undefined ? {} : { signal }),
+        signal: deadline.signal,
       });
     } catch (error) {
-      throw validationError(signal?.aborted || isAbortError(error) ? "abort" : "network");
+      throw validationError(signal?.aborted === true || isAbortError(error) && !deadline.timedOut()
+        ? "abort"
+        : deadline.timedOut()
+          ? "timeout"
+          : "network");
     }
-    if (response.status >= 300 && response.status < 400) {
+    if (
+      response.redirected ||
+      response.status === 0 ||
+      (response.status >= 300 && response.status < 400)
+    ) {
+      void response.body?.cancel().catch(() => undefined);
       throw validationError("unexpected-response");
     }
     if (!response.ok) {
@@ -130,12 +152,14 @@ export class CredentialBroker {
       value = await readBoundedResponseJson(
         response,
         MAX_VALIDATION_RESPONSE_BYTES,
-        signal,
+        deadline.signal,
       );
     } catch (error) {
       throw validationError(
-        signal?.aborted === true || isAbortError(error)
+        signal?.aborted === true || isAbortError(error) && !deadline.timedOut()
           ? "abort"
+          : deadline.timedOut()
+            ? "timeout"
           : "unexpected-response",
       );
     }
@@ -168,7 +192,7 @@ function assertCandidate(value: string): void {
 }
 
 function validationError(
-  kind: "abort" | "network" | "candidate-invalid" | "unexpected-response",
+  kind: "abort" | "timeout" | "network" | "candidate-invalid" | "unexpected-response",
 ): CredentialValidationError {
   return new CredentialValidationError(toModellixError({
     service: "design",

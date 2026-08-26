@@ -1,11 +1,12 @@
 import { DesignError } from "./errors.js";
 import type { FetchPort } from "./ports.js";
-import { readBoundedResponseJson } from "../core/http.js";
+import { readBoundedResponseJson, requestDeadline } from "../core/http.js";
 
 const PUBLIC_ORIGIN = "https://www.modellix.ai";
 const PREDICTION_ORIGIN = "https://api.modellix.ai";
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_SCHEMA_RESPONSE_BYTES = 8 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 export interface ModelSchemaDocument {
   readonly provider: string;
@@ -19,16 +20,26 @@ export interface ModelSchemaDocument {
 export interface ModelSchemaClientOptions {
   readonly fetch: FetchPort;
   readonly allowPortalDetailFallback?: boolean;
+  readonly requestTimeoutMs?: number;
 }
 
 export class ModelSchemaClient {
   readonly #fetch: FetchPort;
   readonly #allowPortalDetailFallback: boolean;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: ModelSchemaClientOptions) {
     this.#fetch = options.fetch;
     this.#allowPortalDetailFallback =
       options.allowPortalDetailFallback === true;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.#requestTimeoutMs) ||
+      this.#requestTimeoutMs < 1 ||
+      this.#requestTimeoutMs > 10 * 60_000
+    ) {
+      throw new TypeError("requestTimeoutMs must be a positive safe integer no greater than ten minutes");
+    }
   }
 
   async load(
@@ -60,7 +71,12 @@ export class ModelSchemaClient {
       `/models/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}/api_schema`,
       PUBLIC_ORIGIN,
     );
-    const document = await requestNoAuthorization(this.#fetch, url, signal);
+    const document = await requestNoAuthorization(
+      this.#fetch,
+      url,
+      signal,
+      this.#requestTimeoutMs,
+    );
     const submitUrl = extractAllowedSubmitUrl(document, provider, modelId);
     return {
       provider,
@@ -81,7 +97,12 @@ export class ModelSchemaClient {
       PUBLIC_ORIGIN,
     );
     url.searchParams.set("provider", provider);
-    const payload = await requestNoAuthorization(this.#fetch, url, signal);
+    const payload = await requestNoAuthorization(
+      this.#fetch,
+      url,
+      signal,
+      this.#requestTimeoutMs,
+    );
     const data = asRecord(payload.data) ?? payload;
     const schemaData = parseSchemaData(data.schema_data ?? data.schemaData);
     return {
@@ -177,19 +198,26 @@ async function requestNoAuthorization(
   fetchPort: FetchPort,
   url: URL,
   signal?: AbortSignal,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<Readonly<Record<string, unknown>>> {
   let response: Response;
+  const deadline = requestDeadline(signal, requestTimeoutMs);
   try {
     response = await fetchPort(url, {
       method: "GET",
       headers: new Headers({ accept: "application/json" }),
       redirect: "error",
-      ...(signal === undefined ? {} : { signal }),
+      signal: deadline.signal,
     });
   } catch (cause) {
-    throw new DesignError("SCHEMA_UNAVAILABLE", "The model schema request failed", {
-      cause,
-    });
+    if (signal?.aborted === true) throw cause;
+    throw new DesignError(
+      "SCHEMA_UNAVAILABLE",
+      deadline.timedOut()
+        ? "The model schema request timed out"
+        : "The model schema request failed",
+      { cause, ...(deadline.timedOut() ? { status: 408 } : {}) },
+    );
   }
   if (!response.ok) {
     throw new DesignError(
@@ -200,8 +228,20 @@ async function requestNoAuthorization(
   }
   let parsed: unknown;
   try {
-    parsed = await readBoundedResponseJson(response, MAX_SCHEMA_RESPONSE_BYTES, signal);
+    parsed = await readBoundedResponseJson(
+      response,
+      MAX_SCHEMA_RESPONSE_BYTES,
+      deadline.signal,
+    );
   } catch (cause) {
+    if (signal?.aborted === true) throw cause;
+    if (deadline.timedOut()) {
+      throw new DesignError(
+        "SCHEMA_UNAVAILABLE",
+        "The model schema response timed out",
+        { cause, status: 408 },
+      );
+    }
     throw new DesignError("SCHEMA_INVALID", "The model schema is not valid JSON", {
       cause,
     });

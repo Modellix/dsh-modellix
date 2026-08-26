@@ -4,6 +4,8 @@ import type {
   WebSearchSource,
 } from "@deepseek-ai/dsh-web";
 
+import { isPublicHostname } from "../core/http.js";
+
 export const MODELLIX_WEB_SEARCH_ENDPOINT =
   "https://tool.modellix.ai/v1/web-search" as const;
 export const MODELLIX_WEB_FETCH_ENDPOINT =
@@ -362,10 +364,11 @@ export function validatePublicHttpUrl(value: string, label: string): string {
     (url.protocol !== "http:" && url.protocol !== "https:") ||
     url.username !== "" ||
     url.password !== "" ||
-    url.hostname.length === 0
+    url.hostname.length === 0 ||
+    !isPublicHostname(url.hostname)
   ) {
     throw new ModellixWebContractError(
-      `${label} must be HTTP(S) without user information`,
+      `${label} must be public HTTP(S) without user information`,
     );
   }
   return url.href;

@@ -5,6 +5,7 @@ import {
   DesignHostController,
   type DesignSnapshotWire,
 } from "../../../src/host/design-controller.js";
+import { DESIGN_WIRE_LIMITS } from "../../../src/shared/design-wire-limits.js";
 
 const MODEL_ID = "openai/gpt-image-2";
 const SCHEMA_URL = "https://www.modellix.ai/models/openai/gpt-image-2/api_schema";
@@ -12,8 +13,95 @@ const SUBMIT_URL = "https://api.modellix.ai/api/v1/openai/gpt-image-2";
 const CATALOG_URL = "https://api.modellix.ai/api/v1/models";
 const PLANNER_URL = "https://llm.modellix.ai/v1/chat/completions";
 const API_KEY_SENTINEL = "SENTINEL_MODELLIX_API_KEY";
+const TTS_MODEL_ID = "xai/grok-voice-tts";
+const TTS_SCHEMA_URL = "https://www.modellix.ai/models/xai/grok-voice-tts/api_schema";
+const TTS_SUBMIT_URL = "https://api.modellix.ai/api/v1/xai/grok-voice-tts";
+const ASR_MODEL_ID = "openai/gpt-audio-transcribe";
+const ASR_SCHEMA_URL = "https://www.modellix.ai/models/openai/gpt-audio-transcribe/api_schema";
 
 describe("DesignHostController", () => {
+  it("exposes stable localizable notice codes instead of Host prose", async () => {
+    const catalogUnavailable = controllerHarness(async (input) => {
+      const url = String(input);
+      if (url.startsWith(CATALOG_URL)) return jsonResponse({ error: "offline" }, 503);
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const unavailable = await catalogUnavailable.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-catalog-unavailable",
+    });
+    expect(unavailable.notice).toBe("catalog-unavailable");
+
+    const schemaInvalid = controllerHarness(async (input) => {
+      const url = String(input);
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SCHEMA_URL) return jsonResponse({});
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const invalid = await schemaInvalid.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-schema-invalid",
+    });
+    expect(invalid.notice).toBe("schema-invalid");
+    expect(invalid.draft).toBeNull();
+  });
+
+  it("uses required exact text for TTS while keeping ASR without generation text unavailable", async () => {
+    const tts = controllerHarness(async (input) => {
+      const url = String(input);
+      if (url.startsWith(CATALOG_URL)) return catalogResponseFor(TTS_MODEL_ID, "audio");
+      if (url === TTS_SCHEMA_URL) {
+        return jsonResponse({
+          servers: [{ url: TTS_SUBMIT_URL }],
+          post: operationWithSchema({
+            type: "object",
+            required: ["voice_prompt", "text"],
+            properties: {
+              voice_prompt: { type: "string" },
+              text: { type: "string", minLength: 1, maxLength: 4_000 },
+            },
+          }),
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const selected = await tts.controller.handle("design/select-model", {
+      version: 1,
+      sessionId: "session-tts",
+      modelId: TTS_MODEL_ID,
+    });
+    expect(selected.models.find((model) => model.id === TTS_MODEL_ID)).toMatchObject({
+      kind: "audio",
+      available: true,
+    });
+    expect(requireDraft(selected).primaryInputPath).toBe("/text");
+
+    const asr = controllerHarness(async (input) => {
+      const url = String(input);
+      if (url.startsWith(CATALOG_URL)) return catalogResponseFor(ASR_MODEL_ID, "audio");
+      if (url === ASR_SCHEMA_URL) {
+        return jsonResponse({
+          servers: [{ url: "https://api.modellix.ai/api/v1/openai/gpt-audio-transcribe" }],
+          post: operationWithSchema({
+            type: "object",
+            required: ["audio", "language"],
+            properties: {
+              audio: { type: "string", contentMediaType: "audio/wav" },
+              language: { type: "string" },
+              text: { type: "string" },
+            },
+          }),
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    await expect(asr.controller.handle("design/select-model", {
+      version: 1,
+      sessionId: "session-asr",
+      modelId: ASR_MODEL_ID,
+    })).rejects.toMatchObject({ code: "SCHEMA_INVALID" });
+  });
+
   it("uses one explicit planner call to propose a visible diff without generating media", async () => {
     let plannerPosts = 0;
     let paidPosts = 0;
@@ -97,6 +185,68 @@ describe("DesignHostController", () => {
     expect(applied.draft?.parameters["/quality"]).toBe("high");
     expect(applied.draft?.parameters["/prompt"]).toBe("A paper city");
     assertNoSecretOnWire(applied, harness.values);
+  });
+
+  it("fences concurrent and queued duplicate planner requests for one draft", async () => {
+    let plannerPosts = 0;
+    let plannerStarted!: () => void;
+    let resolvePlanner!: (response: Response) => void;
+    const started = new Promise<void>((resolve) => {
+      plannerStarted = resolve;
+    });
+    const plannerResponse = new Promise<Response>((resolve) => {
+      resolvePlanner = resolve;
+    });
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === PLANNER_URL && init?.method === "POST") {
+        plannerPosts += 1;
+        plannerStarted();
+        return plannerResponse;
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-plan-fence");
+    const draft = requireDraft(selected);
+    const payload = {
+      version: 1,
+      sessionId: "session-plan-fence",
+      modelId: MODEL_ID,
+      instruction: "Use high quality",
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "A paper city", "/quality": "standard" },
+    };
+
+    const first = harness.controller.handle("design/propose", payload);
+    await started;
+    await expect(harness.controller.handle("design/propose", payload)).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      message: "A Design proposal is already pending review",
+    });
+    expect(plannerPosts).toBe(1);
+
+    resolvePlanner(jsonResponse({
+      choices: [{
+        finish_reason: "stop",
+        message: {
+          content: JSON.stringify({
+            set: [{ path: "/quality", value: "high" }],
+            unset: [],
+            needsClarification: null,
+          }),
+        },
+      }],
+    }));
+    await expect(first).resolves.toMatchObject({ proposal: { baseDraftRevision: draft.draftRevision } });
+
+    await expect(harness.controller.handle("design/propose", payload)).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      message: "A Design proposal is already pending review",
+    });
+    expect(plannerPosts).toBe(1);
   });
 
   it("fails closed when the authoritative schema hash or draft revision changes", async () => {
@@ -264,7 +414,6 @@ describe("DesignHostController", () => {
         status: "submit-unknown",
         diagnostic: {
           code: "submit-unknown",
-          message: "The generation outcome is unknown.",
           retryable: false,
         },
       }),
@@ -354,11 +503,54 @@ describe("DesignHostController", () => {
       draftRevision: draft.draftRevision,
       irContractHash: draft.irContractHash,
       parameters: { "/prompt": "Do not report this as rejected" },
-    })).rejects.toThrow(/accepted task core cannot be stored/u);
+    })).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN" });
 
     const recovered = await harness.controller.handle("design/read", {
       version: 1,
       sessionId: "session-storage-down",
+    });
+    expect(paidPosts).toBe(1);
+    expect(recovered.jobs).toEqual([
+      expect.objectContaining({ status: "submit-unknown" }),
+    ]);
+  });
+
+  it("preserves submit-unknown when its WAL annotation cannot be stored", async () => {
+    let paidPosts = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input);
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        paidPosts += 1;
+        throw new Error("ambiguous paid transport outcome");
+      }
+      throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
+    }, {
+      onStorageWrite: (value) => {
+        const document = JSON.parse(value) as {
+          readonly events: readonly { readonly type: string }[];
+        };
+        if (document.events.at(-1)?.type === "submit-unknown") {
+          throw new Error("submit-unknown annotation cannot be stored");
+        }
+      },
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-unknown-storage");
+    const draft = requireDraft(selected);
+
+    await expect(harness.controller.handle("design/submit", {
+      version: 1,
+      sessionId: "session-unknown-storage",
+      modelId: MODEL_ID,
+      draftRevision: draft.draftRevision,
+      irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Keep the intent replay fence" },
+    })).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN" });
+
+    const recovered = await harness.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-unknown-storage",
     });
     expect(paidPosts).toBe(1);
     expect(recovered.jobs).toEqual([
@@ -610,7 +802,6 @@ describe("DesignHostController", () => {
     expect(taskReads).toBe(1);
     expect(first.jobs[0]?.diagnostic).toEqual({
       code: "task-inaccessible",
-      message: "This generation task is no longer accessible.",
       retryable: false,
     });
     expect(second.jobs[0]?.diagnostic).toEqual(first.jobs[0]?.diagnostic);
@@ -758,6 +949,96 @@ describe("DesignHostController", () => {
     });
   });
 
+  it.each([
+    ["design/propose", {
+      version: 1,
+      sessionId: "session-budget-propose",
+      modelId: MODEL_ID,
+      instruction: "Do not dispatch",
+      draftRevision: 0,
+      irContractHash: "a".repeat(64),
+    }],
+    ["design/proposal/apply", {
+      version: 1,
+      sessionId: "session-budget-apply",
+      proposalId: `proposal_${"a".repeat(32)}`,
+    }],
+    ["design/submit", {
+      version: 1,
+      sessionId: "session-budget-submit",
+      modelId: MODEL_ID,
+      draftRevision: 0,
+      irContractHash: "a".repeat(64),
+    }],
+  ] as const)("rejects deeply nested parameters at the %s boundary before network I/O", async (
+    endpoint,
+    payload,
+  ) => {
+    let networkCalls = 0;
+    const harness = controllerHarness(async () => {
+      networkCalls += 1;
+      throw new Error("must not reach network");
+    });
+    let nested: unknown = "value";
+    for (let depth = 0; depth <= DESIGN_WIRE_LIMITS.maxJsonDepth; depth += 1) {
+      nested = [nested];
+    }
+
+    await expect(harness.controller.handle(endpoint, {
+      ...payload,
+      parameters: { "/prompt": nested },
+    })).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      message: "Design parameters exceed the JSON structural budget",
+    });
+    expect(networkCalls).toBe(0);
+  });
+
+  it("rejects parameter node, byte, and cycle violations before network I/O", async () => {
+    let networkCalls = 0;
+    const harness = controllerHarness(async () => {
+      networkCalls += 1;
+      throw new Error("must not reach network");
+    });
+    const base = {
+      version: 1,
+      sessionId: "session-budget-values",
+      modelId: MODEL_ID,
+      instruction: "Do not dispatch",
+      draftRevision: 0,
+      irContractHash: "a".repeat(64),
+    };
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    const cases = [
+      {
+        parameters: {
+          "/prompt": Array.from(
+            { length: DESIGN_WIRE_LIMITS.maxJsonNodes },
+            () => null,
+          ),
+        },
+        message: "Design parameters exceed the JSON structural budget",
+      },
+      {
+        parameters: { "/prompt": "x".repeat(DESIGN_WIRE_LIMITS.maxJsonBytes) },
+        message: "Design parameters exceed the JSON byte budget",
+      },
+      {
+        parameters: { "/prompt": cycle },
+        message: "Design parameters must not contain cycles",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      await expect(harness.controller.handle("design/propose", {
+        ...base,
+        parameters: testCase.parameters,
+      })).rejects.toMatchObject({ code: "INVALID_ARGUMENT", message: testCase.message });
+    }
+    expect(networkCalls).toBe(0);
+  });
+
   it("derives featured membership only from the featured catalog query", async () => {
     const harness = controllerHarness(async (input) => {
       const url = new URL(String(input));
@@ -880,6 +1161,33 @@ function modelSchema(
       },
     },
   };
+}
+
+function operationWithSchema(schema: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  return {
+    requestBody: {
+      content: {
+        "application/json": { schema },
+      },
+    },
+  };
+}
+
+function catalogResponseFor(modelId: string, category: "image" | "video" | "audio"): Response {
+  const [provider, modelIdPart] = modelId.split("/");
+  return jsonResponse({
+    data: {
+      items: [{
+        provider,
+        model_id: modelIdPart,
+        display_name: modelId,
+        category,
+      }],
+      page: 1,
+      page_size: 100,
+      total: 1,
+    },
+  });
 }
 
 function catalogResponse(): Response {

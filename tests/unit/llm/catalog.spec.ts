@@ -58,8 +58,11 @@ describe("Modellix LLM catalog", () => {
   });
 
   it("rejects redirects, malformed IDs, empty lists, and oversized bodies", async () => {
+    const followed = jsonResponse({ data: [{ id: "openai/gpt" }] });
+    Object.defineProperty(followed, "redirected", { value: true });
     const responses = [
       new Response(null, { status: 302, headers: { location: "https://example.test" } }),
+      followed,
       jsonResponse({ data: [{ id: "missing-provider" }] }),
       jsonResponse({ data: [] }),
       jsonResponse({ data: [{ id: "openai/gpt" }] }, { headers: { "content-length": "999" } }),
@@ -69,7 +72,8 @@ describe("Modellix LLM catalog", () => {
       maxResponseBytes: 100,
       fetch: async () => responses.shift()!,
     });
-    for (let index = 0; index < 4; index += 1) {
+    const responseCount = responses.length;
+    for (let index = 0; index < responseCount; index += 1) {
       await expect(client.fetchModels()).rejects.toMatchObject({
         contract: { code: "MODELLIX_UNEXPECTED_RESPONSE" },
       });
@@ -115,6 +119,25 @@ describe("Modellix LLM catalog", () => {
 
     await expect(loading).rejects.toMatchObject({ name: "AbortError" });
     expect(canceled).toBe(true);
+  });
+
+  it("times out a stalled catalog request", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      }));
+    const client = new LlmCatalogClient({
+      resolveCredential: async () => ({ value: "private", credentialEpoch: 1 }),
+      fetch,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(client.fetchModels()).rejects.toMatchObject({
+      contract: { code: "MODELLIX_TIMEOUT" },
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("deduplicates repeated model IDs deterministically", async () => {

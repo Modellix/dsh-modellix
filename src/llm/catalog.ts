@@ -1,6 +1,7 @@
 import {
   parseRetryAfter,
   readBoundedResponseJson,
+  requestDeadline,
   toModellixError,
   type ModellixErrorContract,
 } from "../core/index.js";
@@ -9,6 +10,7 @@ export const MODELLIX_LLM_BASE_URL = "https://llm.modellix.ai/v1" as const;
 export const MODELLIX_LLM_MODELS_URL = `${MODELLIX_LLM_BASE_URL}/models` as const;
 
 const MAX_CATALOG_BYTES = 2 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 const MAX_MODELS = 5_000;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/;
 
@@ -33,6 +35,7 @@ export interface LlmCatalogClientOptions {
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
   readonly maxResponseBytes?: number;
+  readonly requestTimeoutMs?: number;
 }
 
 export class LlmCatalogRequestError extends Error {
@@ -66,14 +69,23 @@ export class LlmCatalogClient {
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
   readonly #maxResponseBytes: number;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: LlmCatalogClientOptions) {
     this.#resolveCredential = options.resolveCredential;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#now = options.now ?? Date.now;
     this.#maxResponseBytes = options.maxResponseBytes ?? MAX_CATALOG_BYTES;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.#maxResponseBytes) || this.#maxResponseBytes < 1) {
       throw new TypeError("maxResponseBytes must be a positive safe integer");
+    }
+    if (
+      !Number.isSafeInteger(this.#requestTimeoutMs) ||
+      this.#requestTimeoutMs < 1 ||
+      this.#requestTimeoutMs > 10 * 60_000
+    ) {
+      throw new TypeError("requestTimeoutMs must be a positive safe integer no greater than ten minutes");
     }
   }
 
@@ -87,6 +99,7 @@ export class LlmCatalogClient {
       }, { kind: "http", status: 401 }));
     }
     assertCredentialSnapshot(credential);
+    const deadline = requestDeadline(signal, this.#requestTimeoutMs);
 
     let response: Response;
     try {
@@ -97,10 +110,14 @@ export class LlmCatalogClient {
           authorization: `Bearer ${credential.value}`,
         },
         redirect: "manual",
-        ...(signal === undefined ? {} : { signal }),
+        signal: deadline.signal,
       });
-    } catch (error) {
-      const kind = signal?.aborted || isAbortError(error) ? "abort" : "network";
+    } catch {
+      const kind = signal?.aborted
+        ? "abort"
+        : deadline.timedOut()
+          ? "timeout"
+          : "network";
       throw new LlmCatalogRequestError(toModellixError({
         service: "llm",
         subsystem: "catalog",
@@ -109,7 +126,12 @@ export class LlmCatalogClient {
       }, { kind }));
     }
 
-    if (response.status >= 300 && response.status < 400) {
+    if (
+      response.redirected ||
+      response.status === 0 ||
+      (response.status >= 300 && response.status < 400)
+    ) {
+      void response.body?.cancel().catch(() => undefined);
       throw unexpected(credential.credentialEpoch);
     }
     if (!response.ok) {
@@ -130,7 +152,9 @@ export class LlmCatalogClient {
       response,
       this.#maxResponseBytes,
       credential.credentialEpoch,
+      deadline.signal,
       signal,
+      deadline.timedOut,
     );
     return {
       models: parseCatalog(raw, credential.credentialEpoch),
@@ -222,13 +246,21 @@ async function readBoundedJson(
   response: Response,
   maximum: number,
   credentialEpoch: number,
-  signal?: AbortSignal,
+  operationSignal: AbortSignal,
+  callerSignal: AbortSignal | undefined,
+  timedOut: () => boolean,
 ): Promise<unknown> {
   try {
-    return await readBoundedResponseJson(response, maximum, signal);
+    return await readBoundedResponseJson(response, maximum, operationSignal);
   } catch (error) {
-    if (signal?.aborted === true || isAbortError(error)) {
-      throw error;
+    if (callerSignal?.aborted === true) throw error;
+    if (timedOut()) {
+      throw new LlmCatalogRequestError(toModellixError({
+        service: "llm",
+        subsystem: "catalog",
+        operation: "list-models",
+        credentialEpoch,
+      }, { kind: "timeout" }));
     }
     throw unexpected(credentialEpoch);
   }
@@ -266,10 +298,6 @@ function hasControlCharacters(value: string): boolean {
     if (codePoint < 32 || codePoint === 127) return true;
   }
   return false;
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

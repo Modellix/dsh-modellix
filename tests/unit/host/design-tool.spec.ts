@@ -18,6 +18,7 @@ import {
   registerModellixDesignTools,
   type DesignToolController,
 } from "../../../src/host/design-tool.js";
+import { DESIGN_WIRE_LIMITS } from "../../../src/shared/design-wire-limits.js";
 
 const MODEL_ID = "openai/gpt-image-2";
 const HASH = "a".repeat(64);
@@ -220,6 +221,31 @@ describe("Modellix Design tools", () => {
       parameters: { "/prompt": "a red fox", "/quality": "high" },
     });
     expect(JSON.stringify(calls)).not.toMatch(/api.?key|authorization/iu);
+  });
+
+  it("rejects deeply nested Generate input before recursive normalization or paid submit", async () => {
+    const endpoints: string[] = [];
+    const controller: DesignToolController = {
+      async handle(endpoint) {
+        endpoints.push(endpoint);
+        return snapshot();
+      },
+    };
+    let nested: unknown = "value";
+    for (let depth = 0; depth <= DESIGN_WIRE_LIMITS.maxJsonDepth; depth += 1) {
+      nested = [nested];
+    }
+    const tool = definition(controller, MODELLIX_DESIGN_GENERATE_TOOL);
+
+    await expect(tool.execute(
+      { model: MODEL_ID, input: { prompt: nested } },
+      execution(),
+    )).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      message: "input exceeds the Design JSON structural budget",
+    });
+    expect(endpoints).toEqual(["design/read", "design/select-model"]);
+    expect(endpoints).not.toContain("design/submit");
   });
 
   it("normalizes an ambiguous paid POST to a non-retryable canonical result", async () => {

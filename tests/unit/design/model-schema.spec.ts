@@ -90,6 +90,25 @@ describe("ModelSchemaClient", () => {
     );
     expect(new Headers(fallbackCall?.[1]?.headers).has("authorization")).toBe(false);
   });
+
+  it("bounds a stalled public schema request", async () => {
+    const fetchMock = vi.fn<FetchPort>(async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      }));
+    const client = new ModelSchemaClient({
+      fetch: fetchMock,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(client.load("openai", "gpt-image-2")).rejects.toMatchObject({
+      code: "SCHEMA_UNAVAILABLE",
+      status: 408,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
 });
 
 function jsonResponse(value: unknown, status = 200): Response {

@@ -88,6 +88,27 @@ describe("Modellix Web wire contracts", () => {
     expect(() => buildFetchRequest("https://user@example.com/")).toThrow(
       ModellixWebContractError,
     );
+    for (const url of [
+      "http://localhost/admin",
+      "http://service.local/admin",
+      "http://127.0.0.1/admin",
+      "http://2130706433/admin",
+      "http://0x7f000001/admin",
+      "http://10.0.0.1/admin",
+      "http://169.254.169.254/latest/meta-data",
+      "http://192.168.1.1/admin",
+      "http://198.51.100.2/fixture",
+      "http://[::1]/admin",
+      "http://[::ffff:7f00:1]/admin",
+      "http://[fc00::1]/admin",
+      "http://[fe80::1]/admin",
+      "http://[2001:db8::1]/fixture",
+    ]) {
+      expect(() => buildFetchRequest(url), url).toThrow(ModellixWebContractError);
+    }
+    expect(buildFetchRequest("https://8.8.8.8/resolve")).toEqual({
+      urls: ["https://8.8.8.8/resolve"],
+    });
   });
 
   it("maps search answer and sources without forwarding billing-only fields", () => {

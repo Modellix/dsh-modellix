@@ -29,11 +29,11 @@ export function redactHeaders(headers: HeaderRecord): Record<string, string | st
     if (value === undefined) {
       continue;
     }
-    redacted[name] = SENSITIVE_HEADERS.has(name.toLowerCase())
+    defineEnumerableOwnProperty(redacted, name, SENSITIVE_HEADERS.has(name.toLowerCase())
       ? REDACTED
       : Array.isArray(value)
         ? value.map(redactPotentialUrl)
-        : redactPotentialUrl(value as string);
+        : redactPotentialUrl(value as string));
   }
   return redacted;
 }
@@ -131,10 +131,10 @@ function redactNode(
   const result: Record<string, RedactedValue> = {};
   for (const key of Object.keys(record).sort()) {
     if (budget.remaining <= 0) {
-      result.__truncated__ = true;
+      defineEnumerableOwnProperty(result, "__truncated__", true);
       break;
     }
-    result[key] = isSensitiveField(key)
+    defineEnumerableOwnProperty(result, key, isSensitiveField(key)
       ? REDACTED
       : key.toLowerCase() === "headers" && isPlainRecord(record[key])
         ? redactNode(
@@ -144,7 +144,7 @@ function redactNode(
             budget,
             seen,
           )
-        : redactNode(record[key], depth + 1, maxDepth, budget, seen);
+        : redactNode(record[key], depth + 1, maxDepth, budget, seen));
   }
   return result;
 }
@@ -163,4 +163,18 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function safeErrorName(value: string): string {
   return /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(value) ? value : "Error";
+}
+
+/** Avoids the legacy `__proto__` setter while retaining ordinary-object output. */
+function defineEnumerableOwnProperty<T>(
+  target: Record<string, T>,
+  key: string,
+  value: T,
+): void {
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
 }

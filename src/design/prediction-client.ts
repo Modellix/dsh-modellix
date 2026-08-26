@@ -8,13 +8,18 @@ import type {
 } from "./ports.js";
 import { systemClock, systemSleep } from "./ports.js";
 import type { JsonValue } from "./schema-ir.js";
-import { readBoundedResponseJson } from "../core/http.js";
+import {
+  isPublicHostname,
+  readBoundedResponseJson,
+  requestDeadline,
+} from "../core/http.js";
 import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
 
 const PREDICTION_ORIGIN = "https://api.modellix.ai";
 const MAX_PREDICTION_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_INLINE_RETRY_DELAY_MS = 5_000;
 const MAX_PERSISTED_RETRY_AFTER_MS = 5 * 60_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CORRELATION_ID = /^[A-Za-z0-9._:-]{1,256}$/;
 
@@ -47,6 +52,7 @@ export interface PredictionClientOptions {
   readonly clock?: ClockPort;
   readonly sleep?: SleepPort;
   readonly logger?: LoggerPort;
+  readonly requestTimeoutMs?: number;
 }
 
 export interface SubmitPredictionInput {
@@ -72,12 +78,21 @@ export class PredictionClient {
   readonly #clock: ClockPort;
   readonly #sleep: SleepPort;
   readonly #logger: LoggerPort | undefined;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: PredictionClientOptions) {
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? systemClock;
     this.#sleep = options.sleep ?? systemSleep;
     this.#logger = options.logger;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.#requestTimeoutMs) ||
+      this.#requestTimeoutMs < 1 ||
+      this.#requestTimeoutMs > 10 * 60_000
+    ) {
+      throw new TypeError("requestTimeoutMs must be a positive safe integer no greater than ten minutes");
+    }
   }
 
   /** A paid POST is attempted exactly once and never follows redirects. */
@@ -96,6 +111,7 @@ export class PredictionClient {
     });
 
     let response: Response;
+    const deadline = requestDeadline(input.signal, this.#requestTimeoutMs);
     try {
       response = await this.#fetch(endpoint, {
         method: "POST",
@@ -107,7 +123,7 @@ export class PredictionClient {
         }),
         body: JSON.stringify(input.body),
         redirect: "error",
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        signal: deadline.signal,
       });
     } catch (cause) {
       this.#log({
@@ -121,6 +137,15 @@ export class PredictionClient {
         "SUBMIT_UNKNOWN",
         "The paid request outcome is unknown; do not retry automatically",
         { cause },
+      );
+    }
+
+    if (response.redirected) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new DesignError(
+        "SUBMIT_UNKNOWN",
+        "The paid request outcome is unknown; do not retry automatically",
+        { status: response.status },
       );
     }
 
@@ -148,7 +173,7 @@ export class PredictionClient {
       payload = await readBoundedResponseJson(
         response,
         MAX_PREDICTION_RESPONSE_BYTES,
-        input.signal,
+        deadline.signal,
       );
     } catch (cause) {
       throw new DesignError(
@@ -157,7 +182,16 @@ export class PredictionClient {
         { cause },
       );
     }
-    const task = parsePredictionTask(payload);
+    let task: PredictionTask | null;
+    try {
+      task = parsePredictionTask(payload);
+    } catch (cause) {
+      throw new DesignError(
+        "SUBMIT_UNKNOWN",
+        "The paid request succeeded but its task response was invalid",
+        { cause },
+      );
+    }
     if (task === null) {
       throw new DesignError(
         "SUBMIT_UNKNOWN",
@@ -186,6 +220,7 @@ export class PredictionClient {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       input.signal?.throwIfAborted();
+      const deadline = requestDeadline(input.signal, this.#requestTimeoutMs);
       try {
         const response = await this.#fetch(url, {
           method: "GET",
@@ -194,7 +229,7 @@ export class PredictionClient {
             authorization: `Bearer ${apiKey}`,
           }),
           redirect: "error",
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
+          signal: deadline.signal,
         });
         if (!response.ok) {
           const failure = new TaskReadFailure(
@@ -217,9 +252,10 @@ export class PredictionClient {
           payload = await readBoundedResponseJson(
             response,
             MAX_PREDICTION_RESPONSE_BYTES,
-            input.signal,
+            deadline.signal,
           );
         } catch (cause) {
+          if (input.signal?.aborted === true || deadline.timedOut()) throw cause;
           throw new DesignError(
             "UNEXPECTED_RESPONSE",
             "Task status response is not valid JSON",
@@ -243,6 +279,19 @@ export class PredictionClient {
         });
         return task;
       } catch (caught) {
+        if (input.signal?.aborted === true) throw caught;
+        if (deadline.timedOut()) {
+          if (attempt === maxAttempts) {
+            throw new DesignError(
+              "TASK_READ_FAILED",
+              "Task status request timed out within the retry bound",
+              { cause: caught, status: 408 },
+            );
+          }
+          lastFailure = caught;
+          await this.#waitBeforeRetry(attempt, null, input.signal);
+          continue;
+        }
         if (caught instanceof DesignError) {
           throw caught;
         }
@@ -390,12 +439,26 @@ export function parseResources(
   value: unknown,
   inheritedExpiresAt: number | null = null,
 ): PredictionResource[] {
+  return parseResourcesAtDepth(value, inheritedExpiresAt, 0);
+}
+
+function parseResourcesAtDepth(
+  value: unknown,
+  inheritedExpiresAt: number | null,
+  depth: number,
+): PredictionResource[] {
+  if (depth > DESIGN_WIRE_LIMITS.maxJsonDepth) {
+    throw new DesignError(
+      "UNEXPECTED_RESPONSE",
+      "Prediction resources exceed the structural depth limit",
+    );
+  }
   const envelope = asRecord(value);
   if (envelope !== null && !hasResourceUrl(envelope)) {
     const nested =
       envelope.resources ?? envelope.result_resources ?? envelope.output;
     if (nested !== undefined && nested !== value) {
-      return parseResources(nested, inheritedExpiresAt);
+      return parseResourcesAtDepth(nested, inheritedExpiresAt, depth + 1);
     }
     const grouped: PredictionResource[] = [];
     for (const [kind, keys] of [
@@ -625,7 +688,10 @@ function safeHttpsUrl(value: unknown): string | null {
   }
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.username === "" && url.password === ""
+    return url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      isPublicHostname(url.hostname)
       ? url.href
       : null;
   } catch {

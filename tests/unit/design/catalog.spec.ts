@@ -121,6 +121,21 @@ describe("ModelCatalogClient", () => {
     });
   });
 
+  it("bounds a stalled catalog request", async () => {
+    const fetchMock = stalledFetch();
+    const client = new ModelCatalogClient({
+      fetch: fetchMock,
+      getApiKey: () => "key",
+      requestTimeoutMs: 5,
+    });
+
+    await expect(client.list({ category: "image" })).rejects.toMatchObject({
+      code: "CATALOG_UNAVAILABLE",
+      status: 408,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { category: "image" as const, page: 0 },
     { category: "image" as const, page: 10_001 },
@@ -176,4 +191,13 @@ function requireCall(
     throw new Error(`Missing fetch call ${index}`);
   }
   return [call[0], call[1]];
+}
+
+function stalledFetch(): ReturnType<typeof vi.fn<FetchPort>> {
+  return vi.fn<FetchPort>(async (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+        once: true,
+      });
+    }));
 }

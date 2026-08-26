@@ -25,7 +25,7 @@ describe("parseDesignSchema", () => {
                     type: ["string", "null"],
                     minLength: 1,
                     maxLength: 4_000,
-                    pattern: ".+",
+                    pattern: "^.+$",
                   },
                   count: {
                     type: "integer",
@@ -86,7 +86,94 @@ describe("parseDesignSchema", () => {
     });
   });
 
-  it("discovers lexical-first OpenAPI POST and reports multiple operations", () => {
+  it("selects explicit generation text fields by a closed priority", () => {
+    const promptFirst = parseDesignSchema({
+      type: "object",
+      required: ["text", "prompt"],
+      properties: {
+        text: { type: "string" },
+        negative_prompt: { type: "string" },
+        prompt: { type: "string" },
+      },
+    });
+    expect(promptFirst.primaryPromptPath).toBe("/prompt");
+
+    const tts = parseDesignSchema({
+      type: "object",
+      required: ["voice_prompt", "text"],
+      properties: {
+        voice_prompt: { type: "string" },
+        text: { type: "string", minLength: 1 },
+      },
+    });
+    expect(tts.primaryPromptPath).toBe("/text");
+    expect(tts.fields[0]?.key).toBe("text");
+
+    const inputTextBeforeScript = parseDesignSchema({
+      type: "object",
+      required: ["script", "input_text"],
+      properties: {
+        script: { type: "string" },
+        input_text: { type: "string" },
+      },
+    });
+    expect(inputTextBeforeScript.primaryPromptPath).toBe("/input_text");
+
+    const positivePromptFallback = parseDesignSchema({
+      type: "object",
+      required: ["positive_prompt"],
+      properties: {
+        positive_prompt: { type: "string" },
+        negative_prompt: { type: "string" },
+      },
+    });
+    expect(positivePromptFallback.primaryPromptPath).toBe("/positive_prompt");
+  });
+
+  it("conservatively infers scalar fields from authoritative defaults", () => {
+    const ir = parseDesignSchema({
+      type: "object",
+      required: ["text", "language"],
+      properties: {
+        text: { type: "string" },
+        language: { type: "string", enum: ["en", "zh"] },
+        voice_id: { default: "eve" },
+        structured: { default: { unsafeToInfer: true } },
+      },
+    });
+
+    expect(ir.fields.find((field) => field.key === "voice_id")).toMatchObject({
+      kind: "string",
+      hasDefault: true,
+      defaultValue: "eve",
+    });
+    expect(ir.fields.find((field) => field.key === "structured")?.kind).toBe("unknown");
+  });
+
+  it("does not promote optional ASR text metadata or arbitrary required strings", () => {
+    const asr = parseDesignSchema({
+      type: "object",
+      required: ["audio", "language"],
+      properties: {
+        audio: { type: "string", contentMediaType: "audio/wav" },
+        language: { type: "string" },
+        text: { type: "string" },
+      },
+    });
+    expect(asr.primaryPromptPath).toBeNull();
+
+    const modifierOnly = parseDesignSchema({
+      type: "object",
+      required: ["voice_prompt", "prompt"],
+      properties: {
+        voice_prompt: { type: "string" },
+        prompt: { type: "string", const: "fixed" },
+      },
+    });
+    expect(modifierOnly.primaryPromptPath).toBeNull();
+  });
+
+  it("fails closed when OpenAPI exposes multiple paid POST operations", () => {
     const ir = parseDesignSchema({
       openapi: "3.1.0",
       paths: {
@@ -97,8 +184,9 @@ describe("parseDesignSchema", () => {
     expect(ir.operationPath).toBe("/a");
     expect(ir.fields.map((field) => field.key)).toEqual(["a"]);
     expect(ir.diagnostics).toContainEqual(
-      expect.objectContaining({ code: "MULTIPLE_POST_OPERATIONS", blocking: false }),
+      expect.objectContaining({ code: "MULTIPLE_POST_OPERATIONS", blocking: true }),
     );
+    expect(ir.supported).toBe(false);
   });
 
   it("accepts api_schema variants whose root post is already the body schema", () => {
@@ -173,7 +261,7 @@ describe("parseDesignSchema", () => {
     expect(ir.supported).toBe(false);
   });
 
-  it("detects reference cycles and node/depth budget exhaustion", () => {
+  it("detects reference cycles and rejects raw budget exhaustion before hashing", () => {
     const cycle = parseDesignSchema({
       $defs: {
         node: {
@@ -189,7 +277,7 @@ describe("parseDesignSchema", () => {
       expect.objectContaining({ code: "REF_CYCLE", blocking: true }),
     );
 
-    const budget = parseDesignSchema(
+    expect(() => parseDesignSchema(
       {
         type: "object",
         properties: Object.fromEntries(
@@ -197,10 +285,51 @@ describe("parseDesignSchema", () => {
         ),
       },
       { maxNodes: 2 },
-    );
-    expect(budget.diagnostics).toContainEqual(
-      expect.objectContaining({ code: "BUDGET_EXCEEDED" }),
-    );
+    )).toThrowError(DesignError);
+
+    let deeplyNested: Record<string, unknown> = { type: "string" };
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      deeplyNested = { nested: deeplyNested };
+    }
+    expect(() => parseDesignSchema(deeplyNested)).toThrowError(DesignError);
+  });
+
+  it("bounds acyclic shared-reference DAG traversal before exponential expansion", () => {
+    const definitions: Record<string, unknown> = {
+      level_0: { type: "string" },
+    };
+    for (let level = 1; level <= 20; level += 1) {
+      const previous = `#/$defs/level_${String(level - 1)}`;
+      definitions[`level_${String(level)}`] = {
+        allOf: [{ $ref: previous }, { $ref: previous }],
+      };
+    }
+
+    const ir = parseDesignSchema({
+      $defs: definitions,
+      type: "object",
+      required: ["prompt"],
+      properties: { prompt: { $ref: "#/$defs/level_20" } },
+    });
+
+    expect(ir.supported).toBe(false);
+    expect(ir.diagnostics).toContainEqual(expect.objectContaining({
+      code: "BUDGET_EXCEEDED",
+      blocking: true,
+      message: "Schema parsing stopped at the maximum schema traversal operation count",
+    }));
+  });
+
+  it("accepts the exact raw structural boundary and rejects one step beyond it", () => {
+    const boundary = {
+      type: "object",
+      properties: { prompt: { type: "string" } },
+    };
+    expect(parseDesignSchema(boundary, { maxDepth: 3, maxNodes: 5 }).supported).toBe(true);
+    expect(() => parseDesignSchema(boundary, { maxDepth: 2, maxNodes: 5 }))
+      .toThrowError("depth limit");
+    expect(() => parseDesignSchema(boundary, { maxDepth: 3, maxNodes: 4 }))
+      .toThrowError("node limit");
   });
 
   it("produces a stable SHA-256 hash independent of object key insertion order", () => {
@@ -223,6 +352,24 @@ describe("parseDesignSchema", () => {
         { maxBytes: 1_024 },
       ),
     ).toThrowError(DesignError);
+  });
+
+  it.each([
+    "^(a|aa)+$",
+    "^(a+)+$",
+    "^a*a*b$",
+    ".+",
+  ])("blocks untrusted regular expression %s before runtime validation", (pattern) => {
+    const ir = parseDesignSchema({
+      type: "object",
+      properties: { prompt: { type: "string", pattern } },
+    });
+
+    expect(ir.supported).toBe(false);
+    expect(ir.diagnostics).toContainEqual(expect.objectContaining({
+      keyword: "pattern",
+      blocking: true,
+    }));
   });
 
   it.each(["__proto__", "constructor", "prototype"])(

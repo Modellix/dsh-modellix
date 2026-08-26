@@ -1,4 +1,5 @@
 import type { Context } from "@deepseek-ai/cordis";
+import { createHash } from "node:crypto";
 import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +12,7 @@ import {
 } from "../../../src/core/index.js";
 import {
   EMPTY_LLM_ROUTE_LEDGER,
+  MODELLIX_LLM_PROVENANCE_FIELD,
   planLlmRouteMaterialization,
 } from "../../../src/llm/index.js";
 import { ModellixRuntime, type ModellixRuntimeState } from "../../../src/host/runtime.js";
@@ -22,6 +24,9 @@ vi.mock("@deepseek-ai/dsh-anonymous-user-id", () => ({
 const MODEL = { id: "openai/gpt-5.6-sol", name: "GPT 5.6 Sol" } as const;
 const VALIDATE_URL = "https://api.modellix.ai/api/v1/apikey/validate";
 const CATALOG_URL = "https://llm.modellix.ai/v1/models";
+const DESIGN_CATALOG_URL = "https://api.modellix.ai/api/v1/models";
+const DESIGN_SCHEMA_URL = "https://www.modellix.ai/models/openai/gpt-image-2/api_schema";
+const DESIGN_PLANNER_URL = "https://llm.modellix.ai/v1/chat/completions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -47,10 +52,41 @@ describe("ModellixRuntime Host contracts", () => {
         verification: "unknown",
         invalidEpoch: null,
       },
-      onboarding: { status: "active", recoveryPending: false },
+      onboarding: { status: "active", recoveryPending: false, recoveryRequestId: null },
       llm: { health: "disabled", modelCount: 0, refreshedAt: null },
     });
     expect(JSON.stringify(state)).not.toContain("apiKey");
+
+    await harness.dispose();
+  });
+
+  it("issues a fresh non-secret recovery request only for explicit capability actions", async () => {
+    const harness = new RuntimeHarness({ config: configWith({ llm: false }) });
+    installFetch(rejectUnexpectedFetch);
+    await ModellixRuntime.create(harness.context);
+
+    expect((await harness.state()).onboarding.recoveryRequestId).toBeNull();
+    await harness.rpcValue("design/read", {
+      version: 1,
+      sessionId: "session-recovery",
+    });
+    expect((await harness.state()).onboarding.recoveryRequestId).toBeNull();
+
+    await harness.rpcValue("design/refresh", {
+      version: 1,
+      sessionId: "session-recovery",
+    });
+    const first = (await harness.state()).onboarding.recoveryRequestId;
+    expect(first).toMatch(/^recovery_[a-f0-9]{32}$/u);
+    expect(JSON.stringify(await harness.state())).not.toMatch(/api.?key|authorization/iu);
+
+    await harness.rpcValue("design/refresh", {
+      version: 1,
+      sessionId: "session-recovery",
+    });
+    const second = (await harness.state()).onboarding.recoveryRequestId;
+    expect(second).toMatch(/^recovery_[a-f0-9]{32}$/u);
+    expect(second).not.toBe(first);
 
     await harness.dispose();
   });
@@ -68,6 +104,184 @@ describe("ModellixRuntime Host contracts", () => {
     });
     expect(JSON.stringify(result)).not.toContain("Unknown Design endpoint");
 
+    await harness.dispose();
+  });
+
+  it("preserves submit-unknown over a billed planner HTTP 5xx status", async () => {
+    const harness = new RuntimeHarness({
+      config: configWith({ llm: false, credentialEpoch: 1 }),
+      credential: "unit-test-planner-key",
+    });
+    let plannerPosts = 0;
+    installFetch(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith(DESIGN_CATALOG_URL)) {
+        return jsonResponse({
+          data: {
+            items: [{
+              provider: "openai",
+              model_id: "gpt-image-2",
+              display_name: "GPT Image 2",
+              category: "image",
+            }],
+            page: 1,
+            page_size: 100,
+            total: 1,
+          },
+        });
+      }
+      if (url === DESIGN_SCHEMA_URL) {
+        return jsonResponse({
+          servers: [{ url: "https://api.modellix.ai/api/v1/openai/gpt-image-2" }],
+          post: {
+            requestBody: {
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["prompt"],
+                    properties: { prompt: { type: "string", minLength: 1 } },
+                  },
+                },
+              },
+            },
+          },
+        });
+      }
+      if (url === DESIGN_PLANNER_URL && init?.method === "POST") {
+        plannerPosts += 1;
+        return jsonResponse({ error: "temporary" }, 503);
+      }
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    const selected = await harness.rpcValue<{
+      readonly state: {
+        readonly draft: {
+          readonly draftRevision: number;
+          readonly irContractHash: string;
+        } | null;
+      };
+    }>("design/select-model", {
+      version: 1,
+      sessionId: "session-planner-unknown",
+      modelId: "openai/gpt-image-2",
+    });
+    expect(selected.state.draft).not.toBeNull();
+    const proposed = await harness.rpcValue<unknown>("design/propose", {
+      version: 1,
+      sessionId: "session-planner-unknown",
+      modelId: "openai/gpt-image-2",
+      draftRevision: selected.state.draft?.draftRevision,
+      irContractHash: selected.state.draft?.irContractHash,
+      parameters: { "/prompt": "A bounded test prompt" },
+      instruction: "Make it cinematic",
+    });
+
+    expect(proposed).toEqual({
+      version: 1,
+      accepted: false,
+      error: { code: "MODELLIX_SUBMIT_UNKNOWN" },
+    });
+    expect(plannerPosts).toBe(1);
+    await harness.dispose();
+  });
+
+  it("preserves submit-unknown when a billed planner POST is aborted after dispatch", async () => {
+    const harness = new RuntimeHarness({
+      config: configWith({ llm: false, credentialEpoch: 1 }),
+      credential: "unit-test-planner-abort-key",
+    });
+    const abort = new AbortController();
+    let plannerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      plannerStarted = resolve;
+    });
+    let plannerPosts = 0;
+    installFetch(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith(DESIGN_CATALOG_URL)) {
+        return jsonResponse({
+          data: {
+            items: [{
+              provider: "openai",
+              model_id: "gpt-image-2",
+              display_name: "GPT Image 2",
+              category: "image",
+            }],
+            page: 1,
+            page_size: 100,
+            total: 1,
+          },
+        });
+      }
+      if (url === DESIGN_SCHEMA_URL) {
+        return jsonResponse({
+          servers: [{ url: "https://api.modellix.ai/api/v1/openai/gpt-image-2" }],
+          post: {
+            requestBody: {
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["prompt"],
+                    properties: { prompt: { type: "string", minLength: 1 } },
+                  },
+                },
+              },
+            },
+          },
+        });
+      }
+      if (url === DESIGN_PLANNER_URL && init?.method === "POST") {
+        plannerPosts += 1;
+        plannerStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectAbort = (): void => reject(
+            init.signal?.reason ?? new DOMException("aborted", "AbortError"),
+          );
+          if (init.signal?.aborted === true) rejectAbort();
+          else init.signal?.addEventListener("abort", rejectAbort, { once: true });
+        });
+      }
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(harness.context);
+
+    const selected = await harness.rpcValue<{
+      readonly state: {
+        readonly draft: {
+          readonly draftRevision: number;
+          readonly irContractHash: string;
+        } | null;
+      };
+    }>("design/select-model", {
+      version: 1,
+      sessionId: "session-planner-abort",
+      modelId: "openai/gpt-image-2",
+    });
+    const proposed = harness.rpc("design/propose", {
+      version: 1,
+      sessionId: "session-planner-abort",
+      modelId: "openai/gpt-image-2",
+      draftRevision: selected.state.draft?.draftRevision,
+      irContractHash: selected.state.draft?.irContractHash,
+      parameters: { "/prompt": "A bounded test prompt" },
+      instruction: "Make it cinematic",
+    }, abort.signal);
+    await started;
+    abort.abort();
+
+    await expect(proposed).resolves.toEqual({
+      ok: true,
+      value: {
+        version: 1,
+        accepted: false,
+        error: { code: "MODELLIX_SUBMIT_UNKNOWN" },
+      },
+    });
+    expect(plannerPosts).toBe(1);
     await harness.dispose();
   });
 
@@ -343,13 +557,20 @@ describe("ModellixRuntime Host contracts", () => {
 
   it("recovers a crash after route write without claiming the uncommitted route or user drift", async () => {
     const secret = "unit-test-crash-recovery-credential";
-    const planned = planLlmRouteMaterialization(undefined, [MODEL], EMPTY_LLM_ROUTE_LEDGER);
+    const operationId = "llm_interrupted_materialization_13";
+    const planned = planLlmRouteMaterialization(
+      undefined,
+      [MODEL],
+      EMPTY_LLM_ROUTE_LEDGER,
+    );
     const interrupted = beginLlmMaterialization(
       configWith({ llm: true, credentialEpoch: 13 }),
       {
-        operationId: "llm_interrupted_materialization_13",
+        operationId,
         startedAt: 13_000,
         expectedLlmSettingsRevision: 0,
+        previousRouteFingerprint: emptyRouteFingerprint(),
+        targetRouteOwnership: planned.ledger,
       },
     );
     const userRoute = {
@@ -361,6 +582,7 @@ describe("ModellixRuntime Host contracts", () => {
       config: interrupted,
       credential: secret,
       llmRoute: userRoute,
+      llmProvenance: operationId,
     });
     installFetch(async (input) => {
       if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
@@ -369,18 +591,16 @@ describe("ModellixRuntime Host contracts", () => {
     await ModellixRuntime.create(harness.context);
 
     await vi.waitFor(async () => {
-      expect((await harness.state()).llm.health).toBe("ready");
+      expect((await harness.state()).llm.health).toBe("error");
     });
     const state = await harness.state();
-    expect(harness.settings.config.llmOwnership.materializationRecovery).toBeNull();
-    expect(harness.settings.config.llmOwnership.route).toMatchObject({
-      ownership: "adopted",
-      entries: [],
-    });
+    expect(harness.settings.config.llmOwnership.materializationRecovery)
+      .toMatchObject({ operationId: "llm_interrupted_materialization_13" });
+    expect(harness.settings.config.llmOwnership.route).toMatchObject({ ownership: "none" });
     expect(harness.settings.llmRoute).toEqual(userRoute);
-    expect(harness.loggerWarnings).toEqual([[
-      "MODELLIX_LLM_MATERIALIZATION_RECOVERED: pending ownership was reconciled conservatively",
-    ]]);
+    expect(harness.loggerErrors).toContainEqual([
+      "MODELLIX_LLM_MATERIALIZATION_RECOVERY_FAILED: pending ownership remains unresolved",
+    ]);
     expect(JSON.stringify({
       state,
       config: harness.settings.config,
@@ -392,13 +612,64 @@ describe("ModellixRuntime Host contracts", () => {
     await harness.dispose();
   });
 
+  it("commits exact planned ownership when the interrupted route CAS is proven", async () => {
+    const operationId = "llm_interrupted_exact_route_15";
+    const planned = planLlmRouteMaterialization(
+      undefined,
+      [MODEL],
+      EMPTY_LLM_ROUTE_LEDGER,
+    );
+    const interrupted = beginLlmMaterialization(
+      configWith({ llm: true, credentialEpoch: 15 }),
+      {
+        operationId,
+        startedAt: 15_000,
+        expectedLlmSettingsRevision: 0,
+        previousRouteFingerprint: emptyRouteFingerprint(),
+        targetRouteOwnership: planned.ledger,
+      },
+    );
+    const harness = new RuntimeHarness({
+      config: interrupted,
+      credential: "unit-test-exact-route-credential",
+      llmRoute: planned.route,
+      llmProvenance: operationId,
+    });
+    installFetch(async (input) => {
+      if (String(input) === CATALOG_URL) return jsonResponse({ data: [MODEL] });
+      return rejectUnexpectedFetch(input);
+    });
+
+    await ModellixRuntime.create(harness.context);
+    await vi.waitFor(async () => {
+      expect((await harness.state()).llm.health).toBe("ready");
+    });
+
+    expect(harness.settings.config.llmOwnership.materializationRecovery).toBeNull();
+    expect(harness.settings.config.llmOwnership.route).toEqual(planned.ledger);
+    expect(harness.settings.llmRoute).toEqual(planned.route);
+    expect(harness.settings.llmProvenance).toBeUndefined();
+    expect(harness.loggerWarnings).toContainEqual([
+      "MODELLIX_LLM_MATERIALIZATION_RECOVERED: exact pending route ownership was committed",
+    ]);
+
+    await harness.dispose();
+  });
+
   it("replays safely when the crash happened after the marker but before the route write", async () => {
+    const operationId = "llm_interrupted_before_route_14";
     const interrupted = beginLlmMaterialization(
       configWith({ llm: true, credentialEpoch: 14 }),
       {
-        operationId: "llm_interrupted_before_route_14",
+        operationId,
         startedAt: 14_000,
         expectedLlmSettingsRevision: 0,
+        previousRouteFingerprint: emptyRouteFingerprint(),
+        targetRouteOwnership: planLlmRouteMaterialization(
+          undefined,
+          [MODEL],
+          EMPTY_LLM_ROUTE_LEDGER,
+        ).ledger,
       },
     );
     const harness = new RuntimeHarness({
@@ -421,57 +692,113 @@ describe("ModellixRuntime Host contracts", () => {
     await harness.dispose();
   });
 
-  it("finishes an interrupted remove on restart without replaying the Credential mutation", async () => {
-    const planned = planLlmRouteMaterialization(undefined, [MODEL], EMPTY_LLM_ROUTE_LEDGER);
-    const interruptedConfig = configWith({
-      llm: false,
-      credentialEpoch: 7,
-      onboarding: "completed",
-      base: {
-        ...createDefaultConfig(),
-        llmOwnership: {
-          ...createDefaultConfig().llmOwnership,
-          route: planned.ledger,
+  it.each([
+    ["completed", "llm"],
+    ["active", "llm"],
+    ["deferred", "llm"],
+    ["active", "settings"],
+    ["deferred", "settings"],
+  ] as const)(
+    "reconciles a post-unset %s-onboarding removal after a transient %s failure",
+    async (onboarding, failureKind) => {
+      const planned = planLlmRouteMaterialization(undefined, [MODEL], EMPTY_LLM_ROUTE_LEDGER);
+      const interruptedConfig = configWith({
+        llm: false,
+        credentialEpoch: 7,
+        onboarding,
+        base: {
+          ...createDefaultConfig(),
+          llmOwnership: {
+            ...createDefaultConfig().llmOwnership,
+            route: planned.ledger,
+          },
         },
-      },
-    });
+      });
+      const harness = new RuntimeHarness({
+        config: interruptedConfig,
+        credential: "configured-before-interruption",
+        llmRoute: planned.route,
+      });
+      installFetch(rejectUnexpectedFetch);
+      await ModellixRuntime.create(harness.context);
+
+      // One independent downstream write fails after Credential unset. Recovery
+      // must reuse the confirmed mutation epoch without replaying unset.
+      if (failureKind === "llm") {
+        harness.settings.failNextLlmMutation = true;
+      } else {
+        harness.settings.failConfigMutationOnAttempt =
+          harness.settings.configMutationAttempts + 1;
+      }
+      const failed = await harness.rpc(
+        "credential/remove",
+        { version: 1, expectedCredentialEpoch: 7 },
+      );
+      expect(failed).toMatchObject({ ok: false, error: { code: "internal" } });
+      expect(harness.credentials.value).toBeUndefined();
+      const recoveredInProcess = await harness.state();
+      expect(recoveredInProcess).toMatchObject({
+        credential: { configured: false, credentialEpoch: 8 },
+        onboarding: { status: "active", recoveryPending: false, recoveryRequestId: null },
+        llm: { health: "disabled" },
+      });
+      expect(harness.settings.config).toMatchObject({
+        credentialEpoch: 8,
+        onboarding: { status: "active" },
+        llmOwnership: { route: { ownership: "none" } },
+      });
+      expect(harness.settings.llmRoute).toBeUndefined();
+      expect(harness.credentials.unsetCalls).toBe(1);
+      await harness.dispose();
+
+      await harness.restartContext();
+      await ModellixRuntime.create(harness.context);
+      const recovered = await harness.state();
+      expect(recovered).toMatchObject({
+        credential: { configured: false, credentialEpoch: 8 },
+        onboarding: { status: "active", recoveryPending: false, recoveryRequestId: null },
+        llm: { health: "disabled" },
+      });
+      expect(harness.settings.config.llmOwnership.route.ownership).toBe("none");
+      expect(harness.settings.llmRoute).toBeUndefined();
+      expect(harness.credentials.unsetCalls).toBe(1);
+
+      await harness.dispose();
+    },
+  );
+
+  it("reconciles an unset that committed before its provider acknowledgement failed", async () => {
     const harness = new RuntimeHarness({
-      config: interruptedConfig,
-      credential: "configured-before-interruption",
-      llmRoute: planned.route,
+      config: configWith({ llm: false, credentialEpoch: 11 }),
+      credential: "configured-before-uncertain-unset",
     });
     installFetch(rejectUnexpectedFetch);
     await ModellixRuntime.create(harness.context);
+    harness.credentials.failNextUnsetAfterCommit = true;
 
-    // Simulate a crash boundary after Credential unset: the independent LLM
-    // Settings write fails, so plugin Settings still records the old epoch and
-    // ownership ledger when the first runtime goes away.
-    harness.settings.failNextLlmMutation = true;
-    const failed = await harness.rpc(
+    const removed = await harness.rpcValue<{ accepted: boolean; state: ModellixRuntimeState }>(
       "credential/remove",
-      { version: 1, expectedCredentialEpoch: 7 },
+      { version: 1, expectedCredentialEpoch: 11 },
     );
-    expect(failed).toMatchObject({ ok: false, error: { code: "internal" } });
-    expect(harness.credentials.value).toBeUndefined();
-    expect(harness.settings.config).toMatchObject({
-      credentialEpoch: 7,
-      onboarding: { status: "completed" },
-      llmOwnership: { route: { ownership: "created" } },
+
+    expect(removed.accepted).toBe(true);
+    expect(removed.state).toMatchObject({
+      credential: { configured: false, credentialEpoch: 12 },
+      onboarding: { status: "active", recoveryPending: false },
     });
-    expect(harness.settings.llmRoute).toBeDefined();
+    expect(harness.settings.config).toMatchObject({
+      credentialEpoch: 12,
+      onboarding: { status: "active" },
+    });
     expect(harness.credentials.unsetCalls).toBe(1);
     await harness.dispose();
 
     await harness.restartContext();
     await ModellixRuntime.create(harness.context);
-    const recovered = await harness.state();
-    expect(recovered).toMatchObject({
-      credential: { configured: false, credentialEpoch: 8 },
+    expect(await harness.state()).toMatchObject({
+      credential: { configured: false, credentialEpoch: 12 },
       onboarding: { status: "active", recoveryPending: false },
-      llm: { health: "disabled" },
     });
-    expect(harness.settings.config.llmOwnership.route.ownership).toBe("none");
-    expect(harness.settings.llmRoute).toBeUndefined();
     expect(harness.credentials.unsetCalls).toBe(1);
 
     await harness.dispose();
@@ -579,8 +906,9 @@ class RuntimeHarness {
     readonly config: PluginConfig;
     readonly credential?: string;
     readonly llmRoute?: Record<string, unknown>;
+    readonly llmProvenance?: string;
   }) {
-    this.settings = new FakeSettings(options.config, options.llmRoute);
+    this.settings = new FakeSettings(options.config, options.llmRoute, options.llmProvenance);
     this.llm = new FakeLlmRegistry(this.settings);
     this.credentials = new FakeCredentials(
       options.credential,
@@ -732,6 +1060,7 @@ class RuntimeHarness {
 
 class FakeCredentials {
   value: string | undefined;
+  failNextUnsetAfterCommit = false;
   referenceEvents = 0;
   setCalls = 0;
   unsetCalls = 0;
@@ -760,6 +1089,10 @@ class FakeCredentials {
         if (this.value === undefined) return;
         this.value = undefined;
         this.publish();
+        if (this.failNextUnsetAfterCommit) {
+          this.failNextUnsetAfterCommit = false;
+          throw new Error("synthetic post-commit Credential acknowledgement failure");
+        }
       },
     } as unknown as Context["credentials"];
   }
@@ -807,17 +1140,31 @@ class FakeSettings {
     readonly finished: () => void;
   } | undefined;
 
-  constructor(config: PluginConfig, llmRoute?: Record<string, unknown>) {
+  constructor(
+    config: PluginConfig,
+    llmRoute?: Record<string, unknown>,
+    llmProvenance?: string,
+  ) {
     this.config = migrateConfig(config);
-    this.#llmUser = llmRoute === undefined
-      ? {}
-      : { providers: { modellix: structuredClone(llmRoute) } };
+    this.#llmUser = {
+      ...(llmRoute === undefined
+        ? {}
+        : { providers: { modellix: structuredClone(llmRoute) } }),
+      ...(llmProvenance === undefined
+        ? {}
+        : { [MODELLIX_LLM_PROVENANCE_FIELD]: llmProvenance }),
+    };
   }
 
   get llmRoute(): Record<string, unknown> | undefined {
     const providers = asRecord(this.#llmUser.providers);
     const route = providers?.modellix;
     return asRecord(route);
+  }
+
+  get llmProvenance(): string | undefined {
+    const value = this.#llmUser[MODELLIX_LLM_PROVENANCE_FIELD];
+    return typeof value === "string" ? value : undefined;
   }
 
   blockNextLlmMutation(): {
@@ -1099,11 +1446,15 @@ function rejectUnexpectedFetch(input: string | URL | Request): Promise<Response>
   return Promise.reject(new Error(`Unexpected fetch: ${String(input)}`));
 }
 
-function jsonResponse(value: unknown): Response {
+function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
-    status: 200,
+    status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function emptyRouteFingerprint(): string {
+  return createHash("sha256").update("undefined").digest("hex");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

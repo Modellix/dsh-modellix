@@ -6,6 +6,7 @@ import type {
   PredictionTask,
   PredictionTaskStatus,
 } from "./prediction-client.js";
+import { isPublicHostname } from "../core/http.js";
 import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
 
 export const DEFAULT_RESULT_TTL_MS = 7 * 24 * 60 * 60_000;
@@ -738,9 +739,13 @@ function validTimestampOrNull(value: number | null): boolean {
 }
 
 function safeHttpsUrl(value: string): string | null {
+  if (value.length > 16_384) return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.username === "" && url.password === ""
+    return url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      isPublicHostname(url.hostname)
       ? url.href
       : null;
   } catch {

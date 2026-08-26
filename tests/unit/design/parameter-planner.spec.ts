@@ -123,6 +123,24 @@ describe("parameter planner", () => {
     ).toThrowError("Unknown model field");
   });
 
+  it("submits a scalar default when the upstream schema omits its type", () => {
+    const tts = parseDesignSchema({
+      type: "object",
+      required: ["text", "language"],
+      properties: {
+        text: { type: "string", minLength: 1 },
+        language: { type: "string", enum: ["en", "zh"] },
+        voice_id: { default: "eve" },
+      },
+    });
+
+    expect(buildInvocationBody(tts, { text: "Test.", language: "en" })).toEqual({
+      text: "Test.",
+      language: "en",
+      voice_id: "eve",
+    });
+  });
+
   it.each(["__proto__", "constructor", "prototype"])(
     "rejects unsafe JSON Pointer token %s even for a forged IR",
     (token) => {

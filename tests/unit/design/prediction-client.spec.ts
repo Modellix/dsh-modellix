@@ -11,6 +11,7 @@ import {
   parsePredictionTask,
   validateSubmitEndpoint,
 } from "../../../src/design/prediction-client.js";
+import { DESIGN_WIRE_LIMITS } from "../../../src/shared/design-wire-limits.js";
 
 const endpoint = "https://api.modellix.ai/api/v1/openai/gpt-image-2";
 
@@ -72,6 +73,21 @@ describe("PredictionClient", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it("rejects an implicitly followed paid redirect as SUBMIT_UNKNOWN", async () => {
+    const followed = jsonResponse({ task_id: "redirected-task", status: "queued" });
+    Object.defineProperty(followed, "redirected", { value: true });
+    const fetchMock = vi.fn<FetchPort>().mockResolvedValue(followed);
+    const client = new PredictionClient({ fetch: fetchMock });
+
+    await expect(client.submit({
+      endpoint,
+      modelSlug: "openai/gpt-image-2",
+      apiKey: "key-secret",
+      body: { prompt: "once" },
+    })).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("treats retryable HTTP POST status as unknown without retry", async () => {
     const fetchMock = vi
       .fn<FetchPort>()
@@ -85,6 +101,42 @@ describe("PredictionClient", () => {
         body: { prompt: "once" },
       }),
     ).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN", status: 503 });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("times out a paid submission once and preserves an unknown outcome", async () => {
+    const fetchMock = stalledFetch();
+    const client = new PredictionClient({
+      fetch: fetchMock,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(client.submit({
+      endpoint,
+      modelSlug: "openai/gpt-image-2",
+      apiKey: "key-secret",
+      body: { prompt: "once only" },
+    })).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("maps an invalid paid success envelope to SUBMIT_UNKNOWN without retry", async () => {
+    const fetchMock = vi.fn<FetchPort>().mockResolvedValue(jsonResponse({
+      task_id: "task-invalid-success",
+      status: "completed",
+      resources: Array.from({ length: 257 }, (_, index) => ({
+        type: "image",
+        url: `https://cdn.example/result-${String(index)}.png`,
+      })),
+    }));
+    const client = new PredictionClient({ fetch: fetchMock });
+
+    await expect(client.submit({
+      endpoint,
+      modelSlug: "openai/gpt-image-2",
+      apiKey: "key-secret",
+      body: { prompt: "once only" },
+    })).rejects.toMatchObject({ code: "SUBMIT_UNKNOWN" });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
@@ -161,6 +213,27 @@ describe("PredictionClient", () => {
     expect(sleep).toHaveBeenCalledWith(5_000);
   });
 
+  it("bounds each task read timeout and retries GET only", async () => {
+    const fetchMock = stalledFetch();
+    const sleep = vi.fn<(delay: number) => Promise<void>>().mockResolvedValue();
+    const client = new PredictionClient({
+      fetch: fetchMock,
+      requestTimeoutMs: 5,
+      sleep: { sleep },
+    });
+
+    await expect(client.readTask({
+      taskId: "task-timeout",
+      apiKey: "key-secret",
+      maxAttempts: 2,
+    })).rejects.toMatchObject({
+      code: "TASK_READ_FAILED",
+      status: 408,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+  });
+
   it("never places API keys or prompts in logger events", async () => {
     const events: DesignLogEvent[] = [];
     const logger: LoggerPort = { write: (event) => events.push(event) };
@@ -227,6 +300,39 @@ describe("parsePredictionTask", () => {
       })),
     })).toThrowError(DesignError);
   });
+
+  it("rejects recursively wrapped resources beyond the closed depth budget", () => {
+    let resources: unknown = [{
+      type: "image",
+      url: "https://cdn.example/result.png",
+    }];
+    for (let depth = 0; depth <= DESIGN_WIRE_LIMITS.maxJsonDepth; depth += 1) {
+      resources = { resources };
+    }
+
+    expect(() => parsePredictionTask({
+      task_id: "task-deep-results",
+      status: "completed",
+      resources,
+    })).toThrowError(DesignError);
+  });
+
+  it.each([
+    "http://cdn.example/result.png",
+    "https://user@cdn.example/result.png",
+    "https://127.0.0.1/result.png",
+    "https://10.0.0.1/result.png",
+    "https://169.254.169.254/latest/meta-data",
+    "https://[::1]/result.png",
+    "https://[fc00::1]/result.png",
+    "https://service.local/result.png",
+  ])("drops an unsafe browser resource URL: %s", (url) => {
+    expect(parsePredictionTask({
+      task_id: "unsafe-resource",
+      status: "completed",
+      resources: [{ type: "image", url }],
+    })).toMatchObject({ resources: [] });
+  });
 });
 
 function jsonResponse(
@@ -238,4 +344,13 @@ function jsonResponse(
     status,
     headers: { "content-type": "application/json", ...headers },
   });
+}
+
+function stalledFetch(): ReturnType<typeof vi.fn<FetchPort>> {
+  return vi.fn<FetchPort>(async (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+        once: true,
+      });
+    }));
 }

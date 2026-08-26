@@ -82,6 +82,18 @@ export interface LlmMaterializationRecovery {
   readonly operationId: string;
   readonly startedAt: number;
   readonly expectedLlmSettingsRevision: number;
+  /** Fingerprint of the raw user route before the CAS. Null only for legacy evidence. */
+  readonly previousRouteFingerprint: string | null;
+  /** Planned ownership, persisted before the route CAS. Null only for legacy evidence. */
+  readonly targetRouteOwnership: LlmRouteOwnershipConfig | null;
+}
+
+export interface BeginLlmMaterializationInput {
+  readonly operationId: string;
+  readonly startedAt: number;
+  readonly expectedLlmSettingsRevision: number;
+  readonly previousRouteFingerprint: string;
+  readonly targetRouteOwnership: LlmRouteOwnershipConfig;
 }
 
 export interface LlmOwnershipConfig {
@@ -206,6 +218,10 @@ export function migrateConfig(input: unknown): PluginConfig {
   const legacyWeb = serviceRecord(input.web);
   const onboarding = isRecord(input.onboarding) ? input.onboarding : {};
   const llmOwnership = isRecord(input.llmOwnership) ? input.llmOwnership : {};
+  const hasLlmMaterializationRecovery = Object.hasOwn(
+    llmOwnership,
+    "materializationRecovery",
+  );
 
   const migrated: PluginConfig = {
     schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION,
@@ -249,6 +265,7 @@ export function migrateConfig(input: unknown): PluginConfig {
       route: migrateLlmRouteOwnership(llmOwnership.route),
       materializationRecovery: migrateLlmMaterializationRecovery(
         llmOwnership.materializationRecovery,
+        hasLlmMaterializationRecovery,
       ),
     },
   };
@@ -276,7 +293,7 @@ export function setServiceToggles(
 
 export function beginLlmMaterialization(
   config: PluginConfig,
-  input: LlmMaterializationRecovery,
+  input: BeginLlmMaterializationInput,
 ): PluginConfig {
   if (config.llmOwnership.materializationRecovery !== null) {
     throw new LlmMaterializationConflictError(
@@ -288,11 +305,21 @@ export function beginLlmMaterialization(
   if (!Number.isSafeInteger(input.expectedLlmSettingsRevision) || input.expectedLlmSettingsRevision < 0) {
     throw new TypeError("expectedLlmSettingsRevision must be a non-negative safe integer");
   }
+  if (safeFingerprint(input.previousRouteFingerprint) === null) {
+    throw new TypeError("previousRouteFingerprint must be a SHA-256 fingerprint");
+  }
+  const targetRouteOwnership = copyLlmRouteOwnership(input.targetRouteOwnership);
+  if (targetRouteOwnership.ownership === "none") {
+    throw new TypeError("targetRouteOwnership must describe a materialized route");
+  }
   return {
     ...config,
     llmOwnership: {
       ...config.llmOwnership,
-      materializationRecovery: { ...input },
+      materializationRecovery: {
+        ...input,
+        targetRouteOwnership,
+      },
     },
   };
 }
@@ -300,17 +327,17 @@ export function beginLlmMaterialization(
 export function completeLlmMaterialization(
   config: PluginConfig,
   operationId: string,
-  route: LlmRouteOwnershipConfig,
 ): PluginConfig {
-  requireLlmMaterializationRecovery(config, operationId);
+  const recovery = requireLlmMaterializationRecovery(config, operationId);
+  if (recovery.targetRouteOwnership === null) {
+    throw new LlmMaterializationConflictError(
+      "Legacy LLM materialization evidence cannot prove route ownership",
+    );
+  }
   return {
     ...config,
     llmOwnership: {
-      route: {
-        ownership: route.ownership,
-        appliedRouteFingerprint: route.appliedRouteFingerprint,
-        entries: route.entries.map((entry) => ({ ...entry })),
-      },
+      route: copyLlmRouteOwnership(recovery.targetRouteOwnership),
       materializationRecovery: null,
     },
   };
@@ -642,16 +669,54 @@ function migrateLlmRouteOwnership(input: unknown): LlmRouteOwnershipConfig {
     : { ownership, appliedRouteFingerprint, entries };
 }
 
-function migrateLlmMaterializationRecovery(input: unknown): LlmMaterializationRecovery | null {
-  if (!isRecord(input)) return null;
+function migrateLlmMaterializationRecovery(
+  input: unknown,
+  present: boolean,
+): LlmMaterializationRecovery | null {
+  if (!present || input === null) return null;
+  if (!isRecord(input)) {
+    throw new TypeError("llmOwnership.materializationRecovery is malformed");
+  }
   const operationId = safeOperationId(input.operationId);
   const startedAt = optionalTimestamp(input.startedAt);
   const expectedLlmSettingsRevision = optionalNonNegativeInteger(
     input.expectedLlmSettingsRevision,
   );
-  return operationId === null || startedAt === null || expectedLlmSettingsRevision === null
+  const previousRouteFingerprint = safeFingerprint(input.previousRouteFingerprint);
+  const migratedTarget = input.targetRouteOwnership === undefined
     ? null
-    : { operationId, startedAt, expectedLlmSettingsRevision };
+    : migrateLlmRouteOwnership(input.targetRouteOwnership);
+  const targetRouteOwnership = migratedTarget?.ownership === "none"
+    ? null
+    : migratedTarget;
+  if (operationId === null || startedAt === null || expectedLlmSettingsRevision === null) {
+    throw new TypeError("llmOwnership.materializationRecovery is malformed");
+  }
+  return {
+    operationId,
+    startedAt,
+    expectedLlmSettingsRevision,
+    previousRouteFingerprint,
+    targetRouteOwnership,
+  };
+}
+
+function copyLlmRouteOwnership(
+  route: LlmRouteOwnershipConfig,
+): LlmRouteOwnershipConfig {
+  const migrated = migrateLlmRouteOwnership(route);
+  if (
+    migrated.ownership !== route.ownership ||
+    migrated.appliedRouteFingerprint !== route.appliedRouteFingerprint ||
+    migrated.entries.length !== route.entries.length
+  ) {
+    throw new TypeError("targetRouteOwnership is malformed");
+  }
+  return {
+    ownership: migrated.ownership,
+    appliedRouteFingerprint: migrated.appliedRouteFingerprint,
+    entries: migrated.entries.map((entry) => ({ ...entry })),
+  };
 }
 
 function requireLlmMaterializationRecovery(

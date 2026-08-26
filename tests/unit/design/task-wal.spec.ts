@@ -231,6 +231,46 @@ describe("DesignTaskRepository", () => {
       code: "STORAGE_INVALID",
     });
   });
+
+  it("fails closed when persisted task resources target a private host", async () => {
+    const repository = new DesignTaskRepository({
+      storage: {
+        read: async () => JSON.stringify({
+          version: 1,
+          events: [
+            {
+              type: "submit-intent",
+              sequence: 1,
+              timestamp: 1,
+              requestId: "request-private-resource",
+              modelSlug: "openai/gpt-image-2",
+              credentialEpoch: 1,
+            },
+            {
+              type: "submit-accepted",
+              sequence: 2,
+              timestamp: 2,
+              requestId: "request-private-resource",
+              task: {
+                ...task("task-private-resource", "succeeded"),
+                resources: [{
+                  kind: "image",
+                  url: "https://127.0.0.1/private.png",
+                  mimeType: "image/png",
+                  expiresAt: null,
+                }],
+              },
+            },
+          ],
+        }),
+        write: async () => undefined,
+      },
+    });
+
+    await expect(repository.listTasks()).rejects.toMatchObject({
+      code: "STORAGE_INVALID",
+    });
+  });
 });
 
 describe("selectAvailableResults", () => {
