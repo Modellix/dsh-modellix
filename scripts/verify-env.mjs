@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 const expected = Object.freeze({
   node: '24.18.1',
   nodeEngine: '^22.19.0 || >=24.0.0',
-  pnpm: '11.7.0',
+  pnpm: '11.24.0',
   dsh: '0.1.1-rc.2',
   cordis: '4.0.1',
   schemastery: '3.18.1',
@@ -65,6 +65,13 @@ function commandVersion(command, args = ['--version']) {
   return result.stdout.trim()
 }
 
+/** @returns {string} */
+function activePnpmVersion() {
+  const userAgent = process.env.npm_config_user_agent
+  const match = typeof userAgent === 'string' ? /^pnpm\/([^\s]+)(?:\s|$)/u.exec(userAgent) : null
+  return match?.[1] ?? commandVersion('pnpm')
+}
+
 /**
  * @param {string} label
  * @param {unknown} actual
@@ -77,7 +84,7 @@ function assertVersion(label, actual, wanted) {
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 assertVersion('Node.js', process.versions.node, expected.node)
-assertVersion('pnpm', commandVersion('pnpm'), expected.pnpm)
+assertVersion('pnpm', activePnpmVersion(), expected.pnpm)
 assertVersion('DSH', commandVersion('dsh'), expected.dsh)
 assertVersion('packageManager', packageJson.packageManager, `pnpm@${expected.pnpm}`)
 assertVersion('engines.node', packageJson.engines?.node, expected.nodeEngine)

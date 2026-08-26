@@ -1,44 +1,35 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # dsh-modellix
 
-Modellix integration for DeepSeek Harness: one API key for schema-driven media generation, a live LLM model catalog, and native Web providers.
+A Modellix Profile Bundle for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): one Modellix API Key provides schema-driven Design media generation, a live LLM model catalog, and native Web providers.
 
-`dsh-modellix` 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 Modellix Profile Bundle。插件在首次使用时提供一个统一的 API Key 配置入口，并默认开启 Design、LLM 和 Web 三项能力；每项能力都可以在 Modellix 设置中单独关闭。
+> Harness and this plugin currently use prerelease interfaces. Before upgrading Harness, check this package's peer dependencies and [CHANGELOG](CHANGELOG.md).
 
-## 功能
+![Chinese-language Modellix Design desktop layout with model, prompt, and parameters on the left and generation results on the right](docs/assets/design-desktop.webp)
 
-### Design
+## Feature overview
 
-- 左侧搜索、按类型筛选并选择模型，填写 prompt、编辑精确参数或提交参数变更提议；右侧查看生成任务和未过期结果。
-- 从 Modellix 模型目录分页发现图片、视频和音频模型，支持手动刷新，并优先恢复最近选择的模型。
-- 每次选择模型时读取其公开 `api_schema`，从 Schema 生成默认值、必填项、枚举、数值范围和 JSON 等输入控件。
-- “用对话调整参数”会使用同一个 Key 调用固定的 Modellix LLM，把自然语言转换为当前 Schema 允许的结构化参数提议。提议先显示差异，用户确认后才应用；发送提议不会自动生成媒体。
-- 点击“确认并生成”才会发起计费提交。提交请求只发送一次，不自动重试；状态查询是独立、有限重试的只读操作。
-- 任务元数据和结果 URL 保存在 Harness Host，结果在 Modellix 返回的有效期内展示，并支持图片放大、音视频播放和安全下载。上游未提供有效期时，插件使用 7 天作为本地展示上限；这不延长上游资源的实际可用期。
+| Feature | User experience | Actual behavior |
+| --- | --- | --- |
+| Design | Select a model, enter a prompt, and adjust parameters on the left; review tasks and results on the right | Reads the live image, video, and audio catalog and each model's public Schema; submits a billed generation only once |
+| LLM | Quickly switch Modellix models in the Harness model selector | Merges the live catalog into the Harness `llm-pi-ai` Modellix provider |
+| Web | Use the native Harness `web_search` and `web_fetch` tools | Registers Modellix Search/Fetch providers without creating duplicate custom tools |
 
-### LLM
+The first-run dialog contains an API Key field and Design, LLM, and Web switches. All three switches are on by default and can later be disabled independently in Modellix settings.
 
-- 使用同一个 API Key 读取 Modellix 当前模型目录。
-- 将模型目录安全合并到 Harness 的 `llm-pi-ai` Modellix Provider，随后可在 Harness 的模型选择器中切换模型。
-- 使用 OpenAI Completions 兼容协议和 `https://llm.modellix.ai/v1`；Provider 请求重试上限固定为 `0`，避免插件层重复模型调用。
-- 设置页显示目录状态、模型数与最近刷新时间，并支持手动刷新。
-
-### Web
-
-- 为 Harness 原生 `web_search` 和 `web_fetch` seam 注册 Modellix Provider，不创建同名自定义 Tool。
-- Bundle 把原生 Search/Fetch Provider 选择为 `modellix`，并启用 Harness 原生 `web_search` 与 `web_fetch` Tool；关闭 Web 开关或缺少有效 Key 时 Provider 不可用。
-
-## 要求
+## Requirements
 
 - DeepSeek Harness `0.1.1-rc.2`
-- Node.js `^22.19.0 || >=24.0.0`
-- 从源码构建时使用 pnpm `11.7.0`
-- 一个有效的 [Modellix API Key](https://docs.modellix.ai/get-started)
+- Published-package runtime: Node.js `^22.19.0 || >=24.0.0`
+- Source development and release verification: Node.js `24.18.1` and pnpm `11.24.0` (see `.nvmrc` and `packageManager`)
+- A valid [Modellix API Key](https://docs.modellix.ai/get-started)
 
-Harness 与本插件当前都使用预发布接口。升级 Harness 前，请先核对本包的 peer dependencies 和变更记录。
+`dsh-modellix` contains its own Harness integration. It neither installs nor invokes `modellix-cli` at runtime.
 
-## 安装
+## Installation
 
-安装已发布的包到目标 Web profile，然后重启该 profile：
+Install the published package into the target Web profile, inspect the merged configuration, then start or restart that profile:
 
 ```sh
 dsh plugin --profile web add dsh-modellix
@@ -46,80 +37,134 @@ dsh --profile web --dump-config
 dsh --profile web
 ```
 
-`--dump-config` 应显示 `dsh-modellix` Bundle 层，以及 id 为 `modellix` 的插件行。若使用的 profile 不是 `web`，请替换 profile 名称。
+`--dump-config` should show the `dsh-modellix` Bundle layer and a plugin row whose id is `modellix`. Replace `web` if you use a different profile.
 
-也可以先从可信源码构建 tarball，再安装预构建制品：
+You can also build a tarball from trusted source and install the artifact:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm run check
-pnpm run build
+pnpm run verify:release:static
 pnpm pack
 dsh plugin --profile web add ./dsh-modellix-0.1.0.tgz
 ```
 
-直接从 Git 安装 TypeScript 源码需要安装阶段能够产出 `lib/`。在包未提供经过验证的 `prepare` 流程时，请使用 npm 发布包或本地 tarball。
+Installing TypeScript source directly from Git requires the installation phase to produce `lib/`. Until the package provides a verified `prepare` flow, use the published package or a local tarball.
 
-## 配置
+## First-time setup
 
-首次打开 Harness Web UI 时，Modellix onboarding 会显示一个 API Key 输入框和三个默认开启的开关：
+1. Open the Harness Web UI and wait for the “Connect Modellix” dialog.
+2. Enter the API Key and confirm whether the three default-on Design, LLM, and Web switches match your needs.
+3. Select “Save and enable.” After a successful save, the browser never displays the Key again; it only shows Credential status and source.
+4. Select “Configure later” if you are not ready. This does not mark the plugin as usable; the next explicit use of an enabled Modellix capability that needs a Credential requests it again.
 
-| 开关 | 作用 |
+The API Key can come from either source:
+
+- Enter it during first-time setup or in settings, where the Harness Credential service stores it.
+- Supply `MODELLIX_API_KEY` in the Harness launch environment. An environment-sourced Key is read-only in the UI; restart Harness after updating it.
+
+Never put a real Key in a repository, command argument, log, screenshot, HAR, recording, or test snapshot.
+
+See the [user guide: first-time setup and Credentials](docs/en-US/USER_GUIDE.md#first-time-setup) for the complete flow.
+
+## Quick use
+
+### Design: generate images, video, or audio
+
+1. Open the **Design** view in Harness.
+2. Search, filter by output type, and select a model. The plugin first restores the most recently selected available model; otherwise it chooses a preferred available model from the current catalog.
+3. Enter the primary prompt. Many models need only a prompt; all other fields come from the model's current `api_schema`, including public defaults.
+4. For exact control, edit enum, switch, numeric, text, or JSON parameters directly. Values that violate the Schema prevent submission.
+5. To adjust parameters in natural language, describe the change under “Adjust parameters by chat.” This uses the same Key with the fixed `openai/gpt-5.6-luna` model and may incur LLM usage. It produces a reviewable diff and never starts media generation by itself.
+6. Review parameters and the billing notice, then select “Confirm and generate” once. The billed POST is never retried automatically; read-only task status checks use only bounded safe retries.
+7. The right results pane groups records as Running, Succeeded, or Diagnostics and supports enlarged images, video/audio playback, and safe downloads.
+
+For example, select an available image model whose live Schema exposes `quality` and `size`, then enter a prompt such as:
+
+> 一座漂浮在云海之上的未来东方城市，清晨金色体积光穿过层叠云雾，青瓷曲面与钛金结构相互交织，空中花园、瀑布和轻盈的飞行器形成丰富前中后景；电影级广角构图，真实材质，细腻光影，克制的青蓝与暖金配色，充满诗意与尺度感，不含文字、标志或水印。
+
+This is the exact prompt used for the documented acceptance image. It describes a cinematic future Eastern city floating above a sea of clouds, with restrained blue-and-gold color, realistic materials, and no text, logos, or watermarks.
+
+Set `quality` to `high` and `size` to `1536x1024`, leaving other fields at the model's current defaults. You can edit those controls directly or ask the parameter assistant to propose the two changes, then review and apply the diff. The proposal may incur LLM usage but does not generate an image. Only the final “Confirm and generate” action starts the billed media request, and the plugin does not retry it automatically. If the selected model does not advertise either field, do not add it manually—choose values and fields from that model's live Schema.
+
+Results remain accessible only while the upstream resource is valid. If the upstream response has no expiry, the plugin uses a seven-day local display limit. This does not extend the upstream URL or copy media into permanent local storage.
+
+### LLM: switch models quickly
+
+1. Keep LLM enabled and configure a valid Key.
+2. In Modellix settings, inspect catalog status, model count, and last refresh time; refresh manually when needed.
+3. Select a model under the Modellix provider in the Harness model selector. The choice applies to the next model call.
+
+LLM uses the OpenAI Completions-compatible endpoint `https://llm.modellix.ai/v1`. The plugin sets provider retries to `0` to avoid repeating model calls at the plugin layer; it never fabricates a static model list when the catalog is unavailable.
+
+### Web: search and fetch
+
+When Web is enabled and a Key is available, ask Harness to search the public Web and, when needed, fetch a selected result. The native `web_search` and `web_fetch` tools run through the Modellix provider; the plugin does not add a duplicate Tool UI. The provider is unavailable when Web is disabled or no valid Key exists. Web requests may incur Modellix usage and are not automatically retried by the provider. If a paid Fetch outcome is unknown, inspect the Harness transcript or Modellix-side record before repeating it manually.
+
+## Settings, states, and recovery
+
+The Modellix settings page provides:
+
+- Credential configuration, source, and verification status, plus replacement and removal for a local writable Credential;
+- independent Design, LLM, and Web switches;
+- LLM catalog health, model count, last refresh time, and manual refresh.
+
+Only an explicit HTTP 401 marks the current Credential invalid and opens recovery. A 402, 429, network failure, or 5xx is not reported as an invalid Key. If an environment-sourced Key is invalid, update `MODELLIX_API_KEY` in the launch environment and restart Harness; the UI cannot override it.
+
+Recovery is coordinated across plugin dialogs: concurrent 401 responses produce one Credential dialog. An already-open local Key editor upgrades in place; if an ordinary removal confirmation or image viewer is open, recovery waits until it closes instead of stacking another modal. Save a replacement Key and retry the intended capability. For an environment-sourced Key, update it outside the UI and restart Harness.
+
+If a disconnected billed submission has an unknown outcome, Design shows “Submission outcome unknown.” Check Results or the Modellix-side record before any manual resubmission to avoid duplicate charges.
+
+## Accessibility and responsive behavior
+
+- Dialogs explicitly manage initial focus, `Tab` / `Shift+Tab` wrapping, background inertness, and focus restoration after closing.
+- A mandatory Credential gate cannot close implicitly through Escape or the backdrop, but always has a visible “Configure later” action. Ordinary confirmation dialogs support Escape.
+- Fields have visible labels, linked errors, busy states, and live status announcements; state is not conveyed by color alone.
+- Design uses a left-workspace/right-results layout when its container is wider than `992px`; narrower host slots stack into one column, with a viewport fallback at `768px`. The implementation targets `320px`, 200% text zoom, light/dark themes, forced colors, 48px coarse-pointer targets, and reduced motion.
+- UI text follows the current Harness locale. `README.md` is the default English entry, with a complete Chinese edition alongside it.
+
+## Uninstallation
+
+If the Key is stored in a local writable Credential, remove it from Modellix settings first. Revoke an environment-sourced Key in the external launch environment or secret manager. Then remove the plugin from the target profile and restart it:
+
+```sh
+dsh plugin --profile web remove dsh-modellix
+dsh --profile web --dump-config
+dsh --profile web
+```
+
+Uninstalling the plugin does not promise to remove external environment variables, upstream tasks, or every piece of persisted Harness data. Handle each system separately if your policy requires cleanup.
+
+## UI previews and safe screenshots
+
+- [完整中文用户指南](docs/zh-CN/USER_GUIDE.md)
+- [Complete English user guide](docs/en-US/USER_GUIDE.md)
+- [Chinese README](README.zh-CN.md)
+
+The repository includes nine safety-reviewed UI screenshots. None contains a real account, Key, Network request details, HAR, or Credential file. Both languages reuse the same images. Most plugin copy is Chinese; `design-mobile-en.webp` and `llm-model-selector.webp` use English Harness chrome, while `web-tools.webp` uses English Harness chrome around a Chinese public-documentation request and response:
+
+| Suggested file | Alt text |
 | --- | --- |
-| Design | 模型选择、Schema 参数编辑、媒体生成与结果列表 |
-| LLM | Modellix 模型目录与 Harness 模型切换 |
-| Web | Modellix 原生 Web Search/Fetch Provider |
+| `docs/assets/onboarding-defaults.webp` | Chinese-language Modellix first-time setup dialog with an empty API Key field and Design, LLM, and Web switches enabled |
+| `docs/assets/settings-ready.webp` | Chinese-language Modellix settings showing a verified Credential, three feature switches, and LLM catalog status |
+| `docs/assets/design-desktop.webp` | Chinese-language Modellix Design desktop layout with model, prompt, and parameters on the left and generation results on the right |
+| `docs/assets/design-proposal.webp` | Chinese-language Design parameter proposal showing before-and-after changes with Apply and Reject actions |
+| `docs/assets/design-results-media.webp` | Chinese-language Design results pane with the image created during real acceptance, its expiry, and download action |
+| `docs/assets/design-mobile-en.webp` | English-language Modellix Design in a single-column layout at 320 pixels with the workspace above Results |
+| `docs/assets/credential-recovery.webp` | Chinese-language Modellix recovery dialog after an invalid API Key with an empty field and Configure later action |
+| `docs/assets/llm-model-selector.webp` | English-language Harness model selector expanded to the Modellix provider with models synchronized from the live catalog |
+| `docs/assets/web-tools.webp` | English-language Harness conversation showing native web_search and web_fetch completed by the Modellix provider for a Chinese public-documentation request |
 
-API Key 有两种来源：
+Use only an empty Key or an explicitly fake Key, a generic prompt, and results without personal information. Do not capture Network, HAR, Console, Credential files, or any real-Secret flow.
 
-- 在 onboarding 或 Modellix 设置页输入，由 Harness Credential 服务保存。
-- 由运行环境提供 `MODELLIX_API_KEY`。环境来源在 UI 中只读，不能被替换或删除。
+## Current limitations
 
-保存后 UI 只显示“已配置”状态，不会回显 Key。选择“稍后处理”只关闭当前弹窗；已启用能力下次需要凭据时仍会提示配置。三个功能开关、Key 更换/移除和 LLM 目录刷新均位于 Modellix 设置页。
+- The Design parameter assistant is constrained by the current Schema; it is not an open-ended agent.
+- There is no upstream cancellation call, and the UI has no task cancellation button.
+- The results pane persists task metadata and upstream resource URLs, not the API Key, prompt, or media copies.
+- A complex Schema with a blocking unsupported constraint disables submission instead of guessing parameter meaning.
+- LLM materializes only models advertised by the live catalog and does not provide fabricated fallback models.
 
-## 使用
-
-### 生成图片、视频或音频
-
-1. 打开 Harness 中的 **Design** 视图。
-2. 选择模型。插件会读取该模型当前的 Schema 并填入公开默认值。
-3. 输入 prompt；需要精准控制时，直接修改下方参数。
-4. 也可在“用对话调整参数”中输入普通描述；该操作可能产生 LLM 用量，检查差异后再点击“应用变更”。
-5. 确认计费提示后点击“确认并生成”。任务状态和未过期资源会显示在右侧结果栏。
-
-只有发布了受支持 Schema 且 Schema 声明了匹配该模型的 Modellix 官方提交地址时，模型才能提交。Schema 发生变化时，旧草稿会被拒绝，需重新加载后确认参数。
-
-### 切换 LLM 模型
-
-1. 保持 LLM 开关开启并配置 API Key。
-2. 在 Modellix 设置页确认“LLM 模型目录”为可用；需要时点击“刷新 LLM 模型”。
-3. 在 Harness 模型选择器中选择 Modellix Provider 下的目标模型。模型切换从下一次模型调用开始生效。
-
-### 使用 Web
-
-保持 Web 开关开启后，Harness 原生 `web_search` 和 `web_fetch` 会通过 Modellix Provider 执行。Web 能力可能产生 Modellix 用量，请以账户侧规则为准。
-
-## 安全与请求语义
-
-- Key 只在 Harness Host 的 Credential 边界内解析；浏览器端不读取已保存值。
-- Key 不进入 URL、设置文档、Design 任务记录、模型上下文、Tool 参数或用户可见诊断。
-- 公开模型 Schema 请求不携带 Authorization；带鉴权请求只允许发送到固定 Modellix HTTPS origin。
-- Design 提交使用 Schema 返回且再次校验的精确模型地址；跨 origin 重定向会被拒绝。
-- 401 只会把当前 Credential epoch 标记为无效；402、429、网络错误和 5xx 不会被误报为 Key 失效。
-- Design 的持久任务记录只包含请求/任务标识、模型、状态和结果 URL，不保存 API Key 或 prompt。
-- 计费 POST 不自动重放。连接中断导致提交结果未知时，任务会标记为“提交结果未知”，由用户决定后续操作。
-
-不要把真实 API Key 写入仓库、命令参数、日志、截图、HAR 或测试快照。
-
-## 当前限制
-
-- Design 参数提议使用固定的 `openai/gpt-5.6-luna`、严格结构化输出和零自动重试；它只修改当前 Schema 声明的参数，不是开放式 Agent。
-- 当前没有上游取消调用；UI 不提供任务取消按钮。
-- 结果区保存的是任务元数据和上游资源 URL，不会把媒体文件复制为永久本地资产。
-- 复杂或含阻断性未支持约束的 Schema 会关闭提交，而不是猜测参数含义。
-- LLM 仅物化 Modellix 实时目录公开的模型；目录不可用时不会编造静态回退列表。
-
-## 本地开发与校验
+## Development and verification
 
 ```sh
 pnpm install --frozen-lockfile
@@ -128,18 +173,80 @@ pnpm run typecheck
 pnpm run lint
 pnpm run test
 pnpm run build
-pnpm pack
+pnpm run verify:pack
+pnpm run verify:fresh-install
+pnpm run verify:node22-install
+pnpm run verify:release:static
 ```
 
-`pnpm run check` 依次执行环境、类型、lint 和单元测试；它不包含构建与打包。修改 Client Bundle 后，需要重启用于验收的 Harness Web profile。发布前还应在独立 profile 中完成 tarball fresh-install、真实浏览器流程和受控的真实 API/Agent E2E；真实计费调用必须由操作者明确触发。
+`pnpm run check` runs environment verification, type checking, lint, the complete unit/contract suite, global hard coverage thresholds, and file-specific regression floors for the Host runtime and Design parameter planner. `verify:pack` checks the exact artifact allowlist, bilingual documentation, nine metadata-free WebP screenshots by actually decoding them, entries, embedded Source Map source, and sensitive-file exclusions. `verify:fresh-install` installs the final tarball in a temporary project, loads Host, executes the Client factory, checks subpath exports, and compiles consumer type smokes. `verify:node22-install` repeats the tarball runtime smoke with an explicitly configured or NVM-discovered Node.js `^22.19.0` binary and fails instead of silently skipping when none exists. `pnpm run verify:release:static` chains these static gates with the production dependency audit.
 
-## 相关文档
+### Complete release evidence gate
 
-- [Modellix 快速开始](https://docs.modellix.ai/get-started)
-- [Modellix LLM 概览](https://docs.modellix.ai/llm/overview)
-- [Modellix GPT Image 2 示例](https://www.modellix.ai/zh_CN/models/openai/gpt-image-2)
+Use `pnpm run verify:release` for an actual release. First commit the final code, documentation, and screenshots and keep the worktree clean. Create two Secret-free JSON files outside the repository. Each must be smaller than 32 KiB, target the current package version and lowercase 40-character HEAD, and use a canonical UTC ISO-8601 `completedAt` no more than 72 hours old. Browser evidence must contain every fixed check below:
+
+```json
+{
+  "version": 1,
+  "kind": "browser",
+  "status": "passed",
+  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "commit": "<current-40-character-lowercase-git-head>",
+  "completedAt": "<canonical-utc-iso-8601>",
+  "checks": {
+    "onboarding": "passed",
+    "settings": "passed",
+    "design": "passed",
+    "llm": "passed",
+    "web": "passed",
+    "401": "passed",
+    "a11y": "passed",
+    "theme": "passed",
+    "viewports": "passed"
+  }
+}
+```
+
+Real API/Agent evidence must cover catalogs, parameter planning, all three media types, the LLM Agent, and Web. `billedCallsExplicitlyAuthorized` attests only that the operator explicitly authorized this run's billed calls; never put a Key, request header, or any other Secret in evidence:
+
+```json
+{
+  "version": 1,
+  "kind": "api-agent",
+  "status": "passed",
+  "package": { "name": "dsh-modellix", "version": "0.1.0" },
+  "commit": "<current-40-character-lowercase-git-head>",
+  "completedAt": "<canonical-utc-iso-8601>",
+  "checks": {
+    "catalogs": "passed",
+    "planner": "passed",
+    "image": "passed",
+    "video": "passed",
+    "audio": "passed",
+    "llm-agent": "passed",
+    "web": "passed"
+  },
+  "billedCallsExplicitlyAuthorized": true
+}
+```
+
+Supply both absolute paths and run the gate. Paths may be environment variables; the API Key must not be:
+
+```sh
+MODELLIX_BROWSER_EVIDENCE_FILE=/absolute/path/browser-evidence.json \
+MODELLIX_API_AGENT_E2E_EVIDENCE_FILE=/absolute/path/api-agent-evidence.json \
+pnpm run verify:release
+```
+
+Evidence is a strictly shaped acceptance attestation; it does not execute or retry billed calls. The gate fails for a missing, failed, or unknown check, unknown field, in-repository or stale file, package/commit mismatch, or dirty worktree.
+
+## References
+
+- [Modellix getting started](https://docs.modellix.ai/get-started)
+- [Modellix LLM overview](https://docs.modellix.ai/llm/overview)
+- [Modellix GPT Image 2 example](https://www.modellix.ai/zh_CN/models/openai/gpt-image-2)
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
-## 许可证
+## License
 
-见 [LICENSE](LICENSE)。
+See [LICENSE](LICENSE).

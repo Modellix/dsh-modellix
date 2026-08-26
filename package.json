@@ -39,6 +39,8 @@
     "lib/**",
     "cordis.patch.yml",
     "README.md",
+    "README.zh-CN.md",
+    "docs/**",
     "CHANGELOG.md",
     "LICENSE"
   ],
@@ -66,18 +68,23 @@
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "lint": "oxlint .",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage && node scripts/verify-critical-coverage.mjs",
     "build:host": "tsdown --env.DSH_BUILD_FACE host",
     "build:client": "tsdown --env.DSH_BUILD_FACE client",
     "build": "pnpm run build:host && pnpm run build:client",
     "verify:pack": "pnpm run build && node scripts/verify-pack.mjs",
-    "check": "pnpm run verify:env && pnpm run typecheck && pnpm run lint && pnpm run test",
+    "verify:fresh-install": "node scripts/verify-fresh-install.mjs",
+    "verify:node22-install": "node scripts/verify-node22-install.mjs",
+    "check": "pnpm run verify:env && pnpm run typecheck && pnpm run lint && pnpm run test:coverage",
+    "verify:release:static": "pnpm run check && pnpm audit --prod --audit-level=high && pnpm run verify:pack && pnpm run verify:fresh-install && pnpm run verify:node22-install",
+    "verify:release": "node scripts/verify-release-evidence.mjs && pnpm run verify:release:static",
     "prepack": "pnpm run build"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "pnpm": "11.7.0"
+    "pnpm": "11.24.0"
   },
-  "packageManager": "pnpm@11.7.0",
+  "packageManager": "pnpm@11.24.0",
   "devEngines": {
     "runtime": {
       "name": "node",
@@ -86,7 +93,7 @@
     },
     "packageManager": {
       "name": "pnpm",
-      "version": "11.7.0",
+      "version": "11.24.0",
       "onFail": "error"
     }
   },
@@ -96,8 +103,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
     "@deepseek-ai/dsh-anonymous-user-id": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
@@ -119,8 +126,8 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
     "@deepseek-ai/dsh-anonymous-user-id": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
@@ -141,10 +148,19 @@
     "@deepseek-ai/dsh-storage-domain": "0.1.1-rc.2",
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/dsh-web": "0.1.1-rc.2",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.6",
     "@types/node": "22.20.0",
     "@types/react": "18.3.1",
+    "@types/react-dom": "18.3.7",
+    "@vitest/coverage-v8": "4.1.8",
+    "jsdom": "30.0.1",
+    "mdast-util-from-markdown": "2.0.3",
     "oxlint": "1.76.0",
     "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "sharp": "0.35.3",
     "tsdown": "0.22.2",
     "typescript": "6.0.3",
     "vitest": "4.1.8"
