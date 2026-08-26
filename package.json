@@ -1,6 +1,6 @@
 {
   "name": "dsh-modellix",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "description": "Modellix Design, LLM, and Web providers for DeepSeek Harness",
   "license": "Apache-2.0",

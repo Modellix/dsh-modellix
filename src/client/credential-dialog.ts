@@ -37,6 +37,17 @@ export class CredentialDialogCoordinator {
     this.#publish({ activeOwner: owner });
   }
 
+  /** Lets an explicit Credential editor adopt a queued shell recovery prompt. */
+  openCredential(owner: string): void {
+    if (
+      this.#snapshot.activeOwner !== null &&
+      this.#snapshot.activeOwner !== RECOVERY_CREDENTIAL_DIALOG_OWNER
+    ) {
+      return;
+    }
+    this.#publish({ activeOwner: owner });
+  }
+
   presentRecovery(token: string): void {
     if (token === this.#snapshot.dismissedRecoveryToken) return;
     if (token === this.#snapshot.recoveryToken) {

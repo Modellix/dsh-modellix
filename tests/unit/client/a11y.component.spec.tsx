@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { useRef, type ReactNode } from "react";
+import { useRef, type ReactNode, type RefObject } from "react";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -36,12 +36,19 @@ function TestDialog({
   );
 }
 
-function GatedTestDialog({ requestedOpen }: { readonly requestedOpen: boolean }): ReactNode {
-  const open = useExternalDialogGate(requestedOpen);
+function GatedTestDialog({
+  requestedOpen,
+  externalDialogOwner,
+}: {
+  readonly requestedOpen: boolean;
+  readonly externalDialogOwner?: RefObject<HTMLElement | null>;
+}): ReactNode {
+  const open = useExternalDialogGate(requestedOpen, externalDialogOwner);
   const container = useRef<HTMLDivElement | null>(null);
   useDialogA11y({
     open,
     container,
+    externalDialogOwner,
     initialFocusSelector: "[data-initial]",
     mandatory: false,
     onEscape: () => undefined,
@@ -51,6 +58,18 @@ function GatedTestDialog({ requestedOpen }: { readonly requestedOpen: boolean })
     <div role="dialog" aria-modal="true" aria-label="Plugin dialog">
       <div ref={container} data-mdlx-dialog-surface="" tabIndex={-1}>
         <button type="button" data-initial="">Plugin action</button>
+      </div>
+    </div>
+  );
+}
+
+function NestedDialogTest(): ReactNode {
+  const owner = useRef<HTMLDivElement | null>(null);
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Host settings">
+      <div ref={owner}>
+        <button type="button" autoFocus>Configure</button>
+        <GatedTestDialog requestedOpen externalDialogOwner={owner} />
       </div>
     </div>
   );
@@ -130,6 +149,20 @@ describe("dialog accessibility behavior", () => {
 
     await waitFor(() =>
       expect(view.getByRole("dialog", { name: "Plugin dialog" })).toBeTruthy(),
+    );
+  });
+
+  it("allows a plugin child dialog owned by the current host modal", async () => {
+    const { portal } = mountOutsideApplication();
+    const view = render(<NestedDialogTest />, { container: portal });
+
+    await waitFor(() =>
+      expect(view.getByRole("dialog", { name: "Plugin dialog" })).toBeTruthy(),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        view.getByRole("button", { name: "Plugin action" }),
+      ),
     );
   });
 

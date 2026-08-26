@@ -82,6 +82,7 @@ import { en, zh, type ModellixLocaleKey } from "../../../src/client/locales.js";
 import { ModellixOnboarding } from "../../../src/client/Onboarding.js";
 import { ModellixRpcClient } from "../../../src/client/rpc.js";
 import { ModellixSettingsSection } from "../../../src/client/SettingsSection.js";
+import { credentialDialogCoordinatorFor } from "../../../src/client/credential-dialog.js";
 import type { ModellixTranslate } from "../../../src/client/shared.js";
 import {
   DesignController,
@@ -718,6 +719,46 @@ describe("Modellix onboarding", () => {
 });
 
 describe("Modellix settings", () => {
+  it("opens the credential dialog from inside the host settings modal", async () => {
+    const current = settingsFixture({ configured: false, source: null });
+    const rpc = testRpc(async () => ({ ok: true, value: current }));
+    render(
+      <div role="dialog" aria-modal="true" aria-label="Host settings">
+        <SettingsSectionForTest
+          controller={new SettingsController(rpc.client)}
+          t={t}
+        />
+      </div>,
+    );
+
+    const configure = await screen.findByRole("button", { name: "配置 API Key" });
+    fireEvent.click(configure);
+
+    expect(
+      await screen.findByRole("dialog", { name: "配置 API Key" }),
+    ).toBeTruthy();
+  });
+
+  it("moves a queued shell recovery prompt into the explicit settings editor", async () => {
+    const current = settingsFixture({ configured: false, source: null });
+    const rpc = testRpc(async () => ({ ok: true, value: current }));
+    const controller = new SettingsController(rpc.client);
+    credentialDialogCoordinatorFor(controller).presentRecovery("missing:1");
+    render(
+      <div role="dialog" aria-modal="true" aria-label="Host settings">
+        <SettingsSectionForTest controller={controller} t={t} />
+      </div>,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "配置 API Key" }),
+    );
+
+    expect(
+      await screen.findByRole("dialog", { name: "配置 API Key" }),
+    ).toBeTruthy();
+  });
+
   it("shows credential/LLM health and executes toggle, refresh, and remove operations", async () => {
     let current = settingsFixture();
     const rpc = testRpc(async (endpoint, payload) => {
@@ -1010,11 +1051,13 @@ describe("Modellix Design view", () => {
       return acceptedDesign(current);
     });
     const settingsRpc = testRpc(async () => ({ ok: true, value: settingsFixture() }));
+    const designController = new DesignController(rpc.client, "session_parameters");
+    const settingsController = new SettingsController(settingsRpc.client);
     const user = userEvent.setup();
-    render(
+    const view = render(
       <DesignViewForTest
-        controller={new DesignController(rpc.client, "session_parameters")}
-        settingsController={new SettingsController(settingsRpc.client)}
+        controller={designController}
+        settingsController={settingsController}
         t={t}
       />,
     );
@@ -1047,6 +1090,27 @@ describe("Modellix Design view", () => {
     );
     expect(screen.getByRole("button", { name: "确认并生成" }).dataset.variant).toBe(
       "outline",
+    );
+    expect(screen.getByText("参数提议已就绪，请检查后决定是否应用。")).toBeTruthy();
+
+    view.rerender(
+      <DesignViewForTest
+        controller={designController}
+        settingsController={settingsController}
+        t={tEn}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("参数提议已就绪，请检查后决定是否应用。")).toBeNull(),
+    );
+    expect(screen.getByRole("heading", { name: "Parameter changes awaiting confirmation" }))
+      .toBeTruthy();
+    view.rerender(
+      <DesignViewForTest
+        controller={designController}
+        settingsController={settingsController}
+        t={t}
+      />,
     );
 
     await user.click(screen.getByRole("button", { name: "应用变更" }));

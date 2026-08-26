@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
   type ReactNode,
 } from "react";
 import type {
@@ -48,6 +49,7 @@ export function ModellixSettingsSection({
   t,
 }: ModellixSettingsProps): ReactNode {
   const state = useResourceState(controller.store);
+  const settingsSectionRef = useRef<HTMLDivElement | null>(null);
   const snapshot = state.data;
   const [services, setServices] = useState<ServiceTogglesWire | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -79,6 +81,10 @@ export function ModellixSettingsSection({
     if (snapshot !== null) setServices(snapshot.services);
   }, [snapshot?.settingsRevision]);
 
+  useEffect(() => {
+    setAnnouncement("");
+  }, [t]);
+
   const busy = state.pending !== null;
   const saveServices = useCallback((): void => {
     if (snapshot === null || services === null || busy) return;
@@ -92,7 +98,7 @@ export function ModellixSettingsSection({
 
   if (snapshot === null || services === null) {
     return (
-      <div className="mdlx-settings">
+      <div ref={settingsSectionRef} className="mdlx-settings">
         <div className="mdlx-live" role="status" aria-live="polite">
           {state.status === "error" ? t("errorGeneric") : t("loading")}
         </div>
@@ -112,7 +118,7 @@ export function ModellixSettingsSection({
     busy || !snapshot.services.llm || !credential.configured;
 
   return (
-    <div className="mdlx-settings">
+    <div ref={settingsSectionRef} className="mdlx-settings">
       <header className="mdlx-heading">
         <h2>{t("settingsTitle")}</h2>
         <p className="mdlx-muted">{t("settingsDescription")}</p>
@@ -143,7 +149,7 @@ export function ModellixSettingsSection({
                   : "outline"
               }
               disabled={busy}
-              onClick={() => credentialDialogs.open(credentialDialogOwner)}
+              onClick={() => credentialDialogs.openCredential(credentialDialogOwner)}
             >
               {credential.configured ? t("replaceKey") : t("configureKey")}
             </Button>
@@ -236,6 +242,7 @@ export function ModellixSettingsSection({
         onCancel={() => credentialDialogs.dismissCredential(credentialDialogOwner)}
         laterLabel={credentialRecovery ? "later" : "cancel"}
         t={t}
+        externalDialogOwner={settingsSectionRef}
       />
 
       <RemoveCredentialDialog
@@ -256,6 +263,7 @@ export function ModellixSettingsSection({
             });
         }}
         t={t}
+        externalDialogOwner={settingsSectionRef}
       />
     </div>
   );
@@ -335,6 +343,7 @@ function RemoveCredentialDialog({
   onClose,
   onConfirm,
   t,
+  externalDialogOwner,
 }: {
   open: boolean;
   busy: boolean;
@@ -342,12 +351,14 @@ function RemoveCredentialDialog({
   onClose: () => void;
   onConfirm: () => void;
   t: ModellixTranslate;
+  externalDialogOwner: RefObject<HTMLElement | null>;
 }): ReactNode {
   const contentRef = useRef<HTMLDivElement | null>(null);
-  const surfaceOpen = useExternalDialogGate(open);
+  const surfaceOpen = useExternalDialogGate(open, externalDialogOwner);
   useDialogA11y({
     open: surfaceOpen,
     container: contentRef,
+    externalDialogOwner,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory: false,
     onEscape: onClose,

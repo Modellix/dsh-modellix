@@ -65,6 +65,22 @@ describe("Credential dialog coordinator", () => {
     });
   });
 
+  it("lets an explicit credential editor adopt a queued shell recovery", () => {
+    const coordinator = new CredentialDialogCoordinator();
+    coordinator.presentRecovery("missing:1");
+
+    coordinator.openCredential("settings-editor");
+
+    expect(coordinator.getSnapshot()).toMatchObject({
+      activeOwner: "settings-editor",
+      recoveryToken: "missing:1",
+    });
+    coordinator.release("settings-editor");
+    expect(coordinator.getSnapshot().activeOwner).toBe(
+      RECOVERY_CREDENTIAL_DIALOG_OWNER,
+    );
+  });
+
   it("preserves a proactive owner when recovery clears and shares one instance per controller", () => {
     const coordinator = new CredentialDialogCoordinator();
     coordinator.open("settings-editor");

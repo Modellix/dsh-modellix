@@ -176,6 +176,10 @@ export function ModellixDesignView({
   }, [state.pending]);
 
   useEffect(() => {
+    setOutcomeAnnouncement("");
+  }, [t]);
+
+  useEffect(() => {
     if (snapshot === null) return;
     const transition = designOutcomeTransition(previousOutcome.current, snapshot);
     previousOutcome.current = {
@@ -264,7 +268,7 @@ export function ModellixDesignView({
                 <Button
                   type="button"
                   variant="primary"
-                  onClick={() => credentialDialogs.open(credentialDialogOwner)}
+                  onClick={() => credentialDialogs.openCredential(credentialDialogOwner)}
                 >
                   {t("configureToContinue")}
                 </Button>

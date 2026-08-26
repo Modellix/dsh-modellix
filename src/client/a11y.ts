@@ -36,6 +36,7 @@ interface DialogGateDecision {
 export interface DialogA11yOptions {
   readonly open: boolean;
   readonly container: RefObject<HTMLElement | null>;
+  readonly externalDialogOwner?: RefObject<HTMLElement | null> | undefined;
   readonly initialFocusSelector?: string;
   readonly mandatory: boolean;
   readonly onEscape: () => void;
@@ -48,7 +49,10 @@ export interface DialogA11yOptions {
  * therefore uses only the ARIA modal contract and a marker owned by this
  * plugin; it does not depend on host classes or DOM structure.
  */
-export function useExternalDialogGate(requestedOpen: boolean): boolean {
+export function useExternalDialogGate(
+  requestedOpen: boolean,
+  externalDialogOwner?: RefObject<HTMLElement | null>,
+): boolean {
   const [decision, setDecision] = useState<DialogGateDecision>({
     requestedOpen: false,
     allowed: false,
@@ -72,7 +76,10 @@ export function useExternalDialogGate(requestedOpen: boolean): boolean {
     const reconcile = (): void => {
       reconciliationQueued = false;
       if (disposed) return;
-      const allowed = !hasVisibleExternalDialog(ownerDocument);
+      const allowed = !hasVisibleExternalDialog(
+        ownerDocument,
+        resolveExternalDialogOwner(externalDialogOwner),
+      );
       setDecision((current) =>
         current.requestedOpen && current.allowed === allowed
           ? current
@@ -108,14 +115,21 @@ export function useExternalDialogGate(requestedOpen: boolean): boolean {
       disposed = true;
       observer?.disconnect();
     };
-  }, [requestedOpen]);
+  }, [externalDialogOwner, requestedOpen]);
 
   return requestedOpen && decision.requestedOpen && decision.allowed;
 }
 
 /** Adds the focus behavior intentionally absent from the public Modal primitive. */
 export function useDialogA11y(options: DialogA11yOptions): void {
-  const { open, container, initialFocusSelector, mandatory, onEscape } = options;
+  const {
+    open,
+    container,
+    externalDialogOwner,
+    initialFocusSelector,
+    mandatory,
+    onEscape,
+  } = options;
   const onEscapeRef = useRef(onEscape);
   const restoreTargetRef = useRef<HTMLElement | null>(null);
   onEscapeRef.current = onEscape;
@@ -175,12 +189,17 @@ export function useDialogA11y(options: DialogA11yOptions): void {
       document.removeEventListener("keydown", onKeyDown, true);
       unlockInert();
       unlockScroll();
-      if (!hasVisibleExternalDialog(document)) {
+      if (
+        !hasVisibleExternalDialog(
+          document,
+          resolveExternalDialogOwner(externalDialogOwner),
+        )
+      ) {
         restoreFocus(restoreTargetRef.current, dialogRoot, appRoot);
         restoreTargetRef.current = null;
       }
     };
-  }, [container, initialFocusSelector, mandatory, open]);
+  }, [container, externalDialogOwner, initialFocusSelector, mandatory, open]);
 }
 
 function lockApplicationRoot(appRoot: HTMLElement | null): () => void {
@@ -277,13 +296,23 @@ function restoreFocus(
   }
 }
 
-function hasVisibleExternalDialog(ownerDocument: Document): boolean {
+function hasVisibleExternalDialog(
+  ownerDocument: Document,
+  allowedOwner: HTMLElement | null = null,
+): boolean {
   return [...ownerDocument.querySelectorAll<HTMLElement>(MODAL_DIALOG_SELECTOR)]
     .some(
       (candidate) =>
+        candidate !== allowedOwner &&
         candidate.querySelector(MODELLIX_DIALOG_SENTINEL) === null &&
         isVisibleDialog(candidate),
     );
+}
+
+function resolveExternalDialogOwner(
+  owner: RefObject<HTMLElement | null> | undefined,
+): HTMLElement | null {
+  return owner?.current?.closest<HTMLElement>(MODAL_DIALOG_SELECTOR) ?? null;
 }
 
 function isVisibleDialog(candidate: HTMLElement): boolean {

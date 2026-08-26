@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type RefObject,
   type ReactNode,
 } from "react";
 import type { TranslateNS } from "@deepseek-ai/dsh-client-ui-slots";
@@ -188,6 +189,7 @@ export interface CredentialModalProps {
   readonly onCancel: () => void;
   readonly laterLabel?: ModellixLocaleKey;
   readonly t: ModellixTranslate;
+  readonly externalDialogOwner?: RefObject<HTMLElement | null> | undefined;
 }
 
 export function CredentialModal(props: CredentialModalProps): ReactNode {
@@ -205,6 +207,7 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
     onCancel,
     laterLabel = "cancel",
     t,
+    externalDialogOwner,
   } = props;
   const [draft, setDraft] = useState("");
   const [visible, setVisible] = useState(false);
@@ -218,7 +221,7 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
   const errorId = `${keyId}-error`;
   const errorPresentation =
     displayedErrorCode === null ? null : presentClientError(displayedErrorCode);
-  const surfaceOpen = useExternalDialogGate(open);
+  const surfaceOpen = useExternalDialogGate(open, externalDialogOwner);
 
   const clear = useCallback((): void => {
     draftRef.current = "";
@@ -234,6 +237,7 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
   useDialogA11y({
     open: surfaceOpen,
     container: contentRef,
+    externalDialogOwner,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory,
     onEscape: close,
