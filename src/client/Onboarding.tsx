@@ -5,6 +5,7 @@ import type {
 } from "@deepseek-ai/dsh-client-ui-slots";
 
 import type { ServiceTogglesWire } from "./contracts.js";
+import { shouldPromptOnboarding } from "./onboarding-state.js";
 import { CredentialModal, DEFAULT_SERVICES, useResourceState } from "./shared.js";
 import type { SettingsController } from "./store.js";
 
@@ -30,17 +31,12 @@ export function ModellixOnboarding({
   }, [controller]);
 
   const snapshot = state.data;
+  const promptRequired = snapshot === null ? false : shouldPromptOnboarding(snapshot);
   useEffect(() => {
     if (snapshot === null) return;
     setServices(snapshot.services);
-    if (
-      snapshot.credential.configured &&
-      snapshot.credential.verification !== "invalid" &&
-      !snapshot.onboarding.recoveryPending
-    ) {
-      complete();
-    }
-  }, [complete, snapshot]);
+    if (!promptRequired) complete();
+  }, [complete, promptRequired, snapshot]);
 
   const save = useCallback(
     async (apiKey: string): Promise<boolean> => {
@@ -66,13 +62,7 @@ export function ModellixOnboarding({
   }, [complete, controller, services, snapshot, state.pending]);
 
   if (snapshot === null) return null;
-  if (
-    snapshot.credential.configured &&
-    snapshot.credential.verification !== "invalid" &&
-    !snapshot.onboarding.recoveryPending
-  ) {
-    return null;
-  }
+  if (!promptRequired) return null;
 
   return (
     <CredentialModal
