@@ -205,6 +205,8 @@ export class SettingsController extends ResourceController<SettingsSnapshotWire>
 
 export class DesignController extends ResourceController<DesignSnapshotWire> {
   readonly #rpc: ModellixRpcClient;
+  #proposeInFlight: Promise<boolean> | null = null;
+  #submitInFlight: Promise<boolean> | null = null;
   readonly sessionId: string;
 
   constructor(rpc: ModellixRpcClient, sessionId: string) {
@@ -234,13 +236,17 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
     parameters: Readonly<Record<string, ClientJsonValue>>,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const snapshot = this.store.getSnapshot().data;
+    const current = this.store.getSnapshot();
+    if (current.pending !== null || this.#proposeInFlight !== null) {
+      return Promise.resolve(false);
+    }
+    const snapshot = current.data;
     const draft = snapshot?.draft;
     if (draft === null || draft === undefined) return Promise.resolve(false);
     if (snapshot === null || selectedDesignModel(snapshot)?.available !== true) {
       return Promise.resolve(false);
     }
-    return this.perform("propose", () =>
+    const proposal = this.perform("propose", () =>
       this.#rpc.proposeDesignParameters(
         {
           sessionId: this.sessionId,
@@ -253,6 +259,12 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
         signal,
       ),
     );
+    this.#proposeInFlight = proposal;
+    const release = (): void => {
+      if (this.#proposeInFlight === proposal) this.#proposeInFlight = null;
+    };
+    void proposal.then(release, release);
+    return proposal;
   }
 
   applyProposal(
@@ -275,13 +287,17 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
     parameters: Readonly<Record<string, ClientJsonValue>>,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const snapshot = this.store.getSnapshot().data;
+    const current = this.store.getSnapshot();
+    if (current.pending !== null || this.#submitInFlight !== null) {
+      return Promise.resolve(false);
+    }
+    const snapshot = current.data;
     const draft = snapshot?.draft;
     if (draft === null || draft === undefined) return Promise.resolve(false);
     if (snapshot === null || selectedDesignModel(snapshot)?.available !== true) {
       return Promise.resolve(false);
     }
-    return this.perform("submit", () =>
+    const submission = this.perform("submit", () =>
       this.#rpc.submitDesign(
         {
           sessionId: this.sessionId,
@@ -293,6 +309,12 @@ export class DesignController extends ResourceController<DesignSnapshotWire> {
         signal,
       ),
     );
+    this.#submitInFlight = submission;
+    const release = (): void => {
+      if (this.#submitInFlight === submission) this.#submitInFlight = null;
+    };
+    void submission.then(release, release);
+    return submission;
   }
 }
 

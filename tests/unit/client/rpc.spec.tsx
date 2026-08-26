@@ -34,7 +34,7 @@ function canonicalState(): object {
       verification: "unknown",
       invalidEpoch: null,
     },
-    onboarding: { status: "active", recoveryPending: false },
+    onboarding: { status: "active", recoveryPending: false, recoveryRequestId: null },
     llm: { health: "missing", modelCount: 0, refreshedAt: null },
   };
 }

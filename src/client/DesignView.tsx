@@ -36,6 +36,16 @@ import {
   type DesignOutcomeTransition,
 } from "./design-state.js";
 import {
+  designDiagnosticMessageKey,
+  designFieldDisabledMessageKey,
+  designModelUnavailableMessageKey,
+  designNoticeMessageKey,
+  jsonParameterIssueMessageKey,
+  parseJsonParameterText,
+  type JsonParameterIssue,
+} from "./design-presentation.js";
+import { DesignResultPreview } from "./DesignResultPreview.js";
+import {
   BusyStatus,
   CredentialModal,
   ErrorNotice,
@@ -44,7 +54,13 @@ import {
   type ModellixTranslate,
 } from "./shared.js";
 import type { DesignController, SettingsController } from "./store.js";
-import { useDialogA11y } from "./a11y.js";
+import { useDialogA11y, useExternalDialogGate } from "./a11y.js";
+import {
+  type CredentialDialogCoordinator,
+  type CredentialDialogSnapshot,
+  credentialDialogCoordinatorFor,
+  useCredentialDialogSnapshot,
+} from "./credential-dialog.js";
 
 export type ModellixDesignProps = PropsRuntime<"conversation.view"> &
   PropsLocale<"modellix"> & {
@@ -70,9 +86,14 @@ export function ModellixDesignView({
   const [invalidFields, setInvalidFields] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const [credentialOpen, setCredentialOpen] = useState(false);
   const [outcomeAnnouncement, setOutcomeAnnouncement] = useState("");
   const gatePresented = useRef(false);
+  const credentialDialogOwner = `design:${useId()}`;
+  const credentialDialogs = credentialDialogCoordinatorFor(settingsController);
+  const credentialDialog = useCredentialDialogSnapshot(credentialDialogs);
+  const credentialOpen = credentialDialog.activeOwner === credentialDialogOwner;
+  const credentialRecovery =
+    credentialOpen && credentialDialog.recoveryToken !== null;
   const previousOutcome = useRef<
     Pick<DesignSnapshotWire, "proposal" | "jobs"> | null
   >(null);
@@ -89,6 +110,11 @@ export function ModellixDesignView({
     void controller.load(abort.signal);
     return () => abort.abort();
   }, [controller]);
+
+  useEffect(
+    () => () => credentialDialogs.release(credentialDialogOwner),
+    [credentialDialogOwner, credentialDialogs],
+  );
 
   useEffect(() => {
     if (
@@ -123,8 +149,10 @@ export function ModellixDesignView({
       return;
     }
     gatePresented.current = true;
-    if (settings.credential.writable) setCredentialOpen(true);
-  }, [settings, snapshot?.credentialReady]);
+    if (settings.credential.writable) {
+      credentialDialogs.open(credentialDialogOwner);
+    }
+  }, [credentialDialogOwner, credentialDialogs, settings, snapshot?.credentialReady]);
 
   useEffect(() => {
     if (
@@ -236,7 +264,7 @@ export function ModellixDesignView({
                 <Button
                   type="button"
                   variant="primary"
-                  onClick={() => setCredentialOpen(true)}
+                  onClick={() => credentialDialogs.open(credentialDialogOwner)}
                 >
                   {t("configureToContinue")}
                 </Button>
@@ -248,7 +276,7 @@ export function ModellixDesignView({
           )}
           {snapshot.notice !== null && (
             <div className="mdlx-info" role="status">
-              <strong>{t("notice")}: </strong>{snapshot.notice}
+              <strong>{t("notice")}: </strong>{t(designNoticeMessageKey(snapshot.notice))}
             </div>
           )}
 
@@ -322,7 +350,9 @@ export function ModellixDesignView({
             </select>
             {selectedModel?.available === false && (
               <span id="mdlx-design-model-status" className="mdlx-error" role="status">
-                {selectedModel.unavailableReason ?? t("modelUnavailable")}
+                {selectedModel.unavailableReason === null
+                  ? t("modelUnavailable")
+                  : t(designModelUnavailableMessageKey(selectedModel.unavailableReason))}
               </span>
             )}
             {snapshot.models.length === 0 ? (
@@ -450,7 +480,11 @@ export function ModellixDesignView({
               <div className="mdlx-actions">
                 <Button
                   type="button"
-                  variant="primary"
+                  variant={
+                    snapshot.credentialReady && snapshot.proposal === null
+                      ? "primary"
+                      : "outline"
+                  }
                   disabled={!canGenerate}
                   aria-busy={submitting}
                   onClick={() => { void controller.submit(parameters); }}
@@ -471,15 +505,29 @@ export function ModellixDesignView({
           </div>
         </section>
 
-        <DesignResults snapshot={snapshot} t={t} />
+        <DesignResults
+          snapshot={snapshot}
+          dateLocale={t("dateLocale")}
+          dialogCoordinator={credentialDialogs}
+          dialog={credentialDialog}
+          t={t}
+        />
       </div>
 
       {settings !== null && (
         <CredentialModal
           open={credentialOpen}
           mandatory
-          title={t("onboardingTitle")}
-          description={t("onboardingDescription")}
+          title={
+            settings.credential.configured ? t("replaceKey") : t("onboardingTitle")
+          }
+          description={
+            credentialRecovery
+              ? settings.credential.configured
+                ? t("errorKeyInvalid")
+                : t("keyRequired")
+              : t("onboardingDescription")
+          }
           busy={settingsState.pending === "replace-credential"}
           errorCode={
             settingsState.errorOperation === "replace-credential"
@@ -494,10 +542,10 @@ export function ModellixDesignView({
             )
           }
           onSaved={() => {
-            setCredentialOpen(false);
+            credentialDialogs.completeCredential(credentialDialogOwner);
             void controller.load();
           }}
-          onCancel={() => setCredentialOpen(false)}
+          onCancel={() => credentialDialogs.dismissCredential(credentialDialogOwner)}
           laterLabel="later"
           t={t}
         />
@@ -572,17 +620,19 @@ function DesignParameterField({
     );
   } else if (field.widget === "switch" || field.kind === "boolean") {
     control = (
-      <input
-        id={id}
-        className="mdlx-switch"
-        type="checkbox"
-        role="switch"
-        checked={value === true}
-        disabled={locked}
-        aria-invalid={invalid || undefined}
-        aria-describedby={describedBy}
-        onChange={(event) => commit(event.currentTarget.checked)}
-      />
+      <label className="mdlx-switch-target" htmlFor={id}>
+        <input
+          id={id}
+          className="mdlx-switch"
+          type="checkbox"
+          role="switch"
+          checked={value === true}
+          disabled={locked}
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy}
+          onChange={(event) => commit(event.currentTarget.checked)}
+        />
+      </label>
     );
   } else if (field.kind === "number" || field.kind === "integer") {
     control = (
@@ -656,7 +706,9 @@ function DesignParameterField({
       {label}
       {control}
       <span id={helpId} className="mdlx-help">
-        {field.disabledReason ?? field.description ?? (locked ? t("fieldUnavailable") : "")}
+        {field.disabledReason === null
+          ? field.description ?? (locked ? t("fieldUnavailable") : "")
+          : t(designFieldDisabledMessageKey(field.disabledReason))}
       </span>
       {invalid && !jsonControl && (
         <span id={errorId} className="mdlx-error">{t("invalidParameter")}</span>
@@ -688,11 +740,12 @@ function JsonParameter({
   const [text, setText] = useState(() =>
     value === undefined ? "" : JSON.stringify(value, null, 2),
   );
-  const [invalid, setInvalid] = useState(false);
+  const [issue, setIssue] = useState<JsonParameterIssue | null>(null);
   useEffect(() => {
     setText(value === undefined ? "" : JSON.stringify(value, null, 2));
-    setInvalid(false);
+    setIssue(null);
   }, [value]);
+  const invalid = issue !== null;
   return (
     <>
       <textarea
@@ -705,27 +758,26 @@ function JsonParameter({
         onChange={(event) => {
           const next = event.currentTarget.value;
           setText(next);
-          if (next.trim() === "") {
-            setInvalid(false);
+          const result = parseJsonParameterText(next, validate);
+          if (result.status === "empty") {
+            setIssue(null);
             onValidityChange(true);
             onChange(undefined);
-            return;
-          }
-          try {
-            const parsed: unknown = JSON.parse(next);
-            if (!isClientJsonValue(parsed) || !validate(parsed)) {
-              throw new Error("invalid JSON value");
-            }
-            setInvalid(false);
+          } else if (result.status === "valid") {
+            setIssue(null);
             onValidityChange(true);
-            onChange(parsed);
-          } catch {
-            setInvalid(true);
+            onChange(result.value);
+          } else {
+            setIssue(result.issue);
             onValidityChange(false);
           }
         }}
       />
-      {invalid && <span id={errorId} className="mdlx-error">{t("invalidParameter")}</span>}
+      {issue !== null && (
+        <span id={errorId} className="mdlx-error">
+          {t(jsonParameterIssueMessageKey(issue))}
+        </span>
+      )}
     </>
   );
 }
@@ -748,7 +800,9 @@ function ProposalCard({
     <section className="mdlx-proposal" aria-labelledby="mdlx-proposal-title">
       <div className="mdlx-heading">
         <h3 id="mdlx-proposal-title">{t("proposalTitle")}</h3>
-        <p className="mdlx-muted">{proposal.summary}</p>
+        <p className="mdlx-muted">
+          {t("proposalSummary", { count: proposal.changes.length })}
+        </p>
       </div>
       <ul className="mdlx-change-list">
         {proposal.changes.map((change) => (
@@ -763,9 +817,7 @@ function ProposalCard({
       {proposal.conflicts.length > 0 && (
         <div className="mdlx-error">
           <strong>{t("conflicts")}</strong>
-          <ul>
-            {proposal.conflicts.map((conflict) => <li key={conflict}>{conflict}</li>)}
-          </ul>
+          <p>{t("proposalConflictsSummary", { count: proposal.conflicts.length })}</p>
         </div>
       )}
       <div className="mdlx-actions">
@@ -792,9 +844,15 @@ function ProposalCard({
 
 function DesignResults({
   snapshot,
+  dateLocale,
+  dialogCoordinator,
+  dialog,
   t,
 }: {
   snapshot: DesignSnapshotWire;
+  dateLocale: string;
+  dialogCoordinator: CredentialDialogCoordinator;
+  dialog: CredentialDialogSnapshot;
   t: ModellixTranslate;
 }): ReactNode {
   const groups = useMemo(() => {
@@ -818,9 +876,9 @@ function DesignResults({
         <div className="mdlx-empty">{t("noResults")}</div>
       ) : (
         <div className="mdlx-design-scroll">
-          <ResultSection title={t("runningTitle")} jobs={groups.running} t={t} />
-          <ResultSection title={t("succeededTitle")} jobs={groups.succeeded} t={t} />
-          <ResultSection title={t("diagnosticsTitle")} jobs={groups.diagnostics} t={t} />
+          <ResultSection title={t("runningTitle")} jobs={groups.running} dateLocale={dateLocale} dialogCoordinator={dialogCoordinator} dialog={dialog} t={t} />
+          <ResultSection title={t("succeededTitle")} jobs={groups.succeeded} dateLocale={dateLocale} dialogCoordinator={dialogCoordinator} dialog={dialog} t={t} />
+          <ResultSection title={t("diagnosticsTitle")} jobs={groups.diagnostics} dateLocale={dateLocale} dialogCoordinator={dialogCoordinator} dialog={dialog} t={t} />
         </div>
       )}
     </section>
@@ -830,10 +888,16 @@ function DesignResults({
 function ResultSection({
   title,
   jobs,
+  dateLocale,
+  dialogCoordinator,
+  dialog,
   t,
 }: {
   title: string;
   jobs: readonly DesignJobWire[];
+  dateLocale: string;
+  dialogCoordinator: CredentialDialogCoordinator;
+  dialog: CredentialDialogSnapshot;
   t: ModellixTranslate;
 }): ReactNode {
   if (jobs.length === 0) return null;
@@ -841,7 +905,16 @@ function ResultSection({
     <section className="mdlx-result-section">
       <h3>{title}</h3>
       <ul className="mdlx-result-list">
-        {jobs.map((job) => <ResultCard key={job.jobId} job={job} t={t} />)}
+        {jobs.map((job) => (
+          <ResultCard
+            key={job.jobId}
+            job={job}
+            dateLocale={dateLocale}
+            dialogCoordinator={dialogCoordinator}
+            dialog={dialog}
+            t={t}
+          />
+        ))}
       </ul>
     </section>
   );
@@ -849,13 +922,19 @@ function ResultSection({
 
 function ResultCard({
   job,
+  dateLocale,
+  dialogCoordinator,
+  dialog,
   t,
 }: {
   job: DesignJobWire;
+  dateLocale: string;
+  dialogCoordinator: CredentialDialogCoordinator;
+  dialog: CredentialDialogSnapshot;
   t: ModellixTranslate;
 }): ReactNode {
   const status = jobStatus(job.status, t);
-  const created = formatTime(job.createdAt);
+  const created = formatTime(job.createdAt, dateLocale);
   const dot: StateDotState =
     job.status === "succeeded"
       ? "done"
@@ -877,14 +956,21 @@ function ResultCard({
       {job.resources.length > 0 && job.status !== "expired" && (
         <div className="mdlx-resource-list">
           {job.resources.map((resource) => (
-            <ResultResource key={resource.id} resource={resource} t={t} />
+            <ResultResource
+              key={resource.id}
+              resource={resource}
+              dateLocale={dateLocale}
+              dialogCoordinator={dialogCoordinator}
+              dialog={dialog}
+              t={t}
+            />
           ))}
         </div>
       )}
       {job.diagnostic !== null && (
         <div className="mdlx-error">
           <strong className="mdlx-code">{job.diagnostic.code}</strong>
-          <p>{job.diagnostic.message}</p>
+          <p>{t(designDiagnosticMessageKey(job.diagnostic.code))}</p>
           {job.diagnostic.retryable && <p>{t("diagnosticRetryable")}</p>}
         </div>
       )}
@@ -894,16 +980,31 @@ function ResultCard({
 
 function ResultResource({
   resource,
+  dateLocale,
+  dialogCoordinator,
+  dialog,
   t,
 }: {
   resource: DesignResourceWire;
+  dateLocale: string;
+  dialogCoordinator: CredentialDialogCoordinator;
+  dialog: CredentialDialogSnapshot;
   t: ModellixTranslate;
 }): ReactNode {
-  const [imageOpen, setImageOpen] = useState(false);
+  const imageDialogOwner = `design-image:${useId()}`;
+  const imageOpen = dialog.activeOwner === imageDialogOwner;
+  const imageSurfaceOpen = useExternalDialogGate(imageOpen);
   const imageDialogRef = useRef<HTMLDivElement | null>(null);
-  const closeImage = useCallback(() => setImageOpen(false), []);
+  const closeImage = useCallback(
+    () => dialogCoordinator.close(imageDialogOwner),
+    [dialogCoordinator, imageDialogOwner],
+  );
+  useEffect(
+    () => () => dialogCoordinator.release(imageDialogOwner),
+    [dialogCoordinator, imageDialogOwner],
+  );
   useDialogA11y({
-    open: imageOpen,
+    open: imageSurfaceOpen,
     container: imageDialogRef,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory: false,
@@ -912,36 +1013,13 @@ function ResultResource({
   return (
     <>
       <article className="mdlx-resource">
-      {resource.kind === "image" ? (
-        <img
-          className="mdlx-media"
-          src={resource.url}
-          alt={t("generatedPreview")}
-          loading="lazy"
-          referrerPolicy="no-referrer"
-        />
-      ) : resource.kind === "video" ? (
-        <video
-          className="mdlx-media"
-          src={resource.url}
-          controls
-          playsInline
-          preload="metadata"
-        />
-      ) : (
-        <audio
-          className="mdlx-media mdlx-media-audio"
-          src={resource.url}
-          controls
-          preload="metadata"
-        />
-      )}
+      <DesignResultPreview resource={resource} t={t} />
       <div className="mdlx-actions mdlx-actions-start">
         {resource.kind === "image" && (
           <button
             type="button"
             className="mdlx-safe-link mdlx-link-button"
-            onClick={() => setImageOpen(true)}
+            onClick={() => dialogCoordinator.open(imageDialogOwner)}
           >
             {t("openImage")}
           </button>
@@ -959,20 +1037,25 @@ function ResultResource({
       </div>
       {resource.expiresAt !== null && (
         <span className="mdlx-help">
-          {t("expiresAt", { time: formatTime(resource.expiresAt) })}
+          {t("expiresAt", { time: formatTime(resource.expiresAt, dateLocale) })}
         </span>
       )}
       </article>
       {resource.kind === "image" && (
         <Modal
-          open={imageOpen}
+          open={imageSurfaceOpen}
           title={t("imageViewerTitle")}
           closeLabel={t("close")}
           onClose={closeImage}
           headless
           className="mdlx-modal mdlx-image-modal"
         >
-          <div ref={imageDialogRef} className="mdlx-modal-content" tabIndex={-1}>
+          <div
+            ref={imageDialogRef}
+            className="mdlx-modal-content"
+            data-mdlx-dialog-surface=""
+            tabIndex={-1}
+          >
             <div className="mdlx-heading">
               <h2 className="mdlx-modal-title">{t("imageViewerTitle")}</h2>
             </div>
@@ -1014,21 +1097,6 @@ function fieldAtPath(
   path: string,
 ): DesignFieldWire | undefined {
   return fields.find((field) => field.path === path);
-}
-
-function isClientJsonValue(value: unknown, depth = 0): value is ClientJsonValue {
-  if (depth > 10) return false;
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return true;
-  }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) {
-    return value.length <= 4_096 && value.every((item) => isClientJsonValue(item, depth + 1));
-  }
-  if (typeof value !== "object") return false;
-  return Object.entries(value).every(
-    ([, item]) => isClientJsonValue(item, depth + 1),
-  );
 }
 
 function designOutcomeText(
@@ -1081,8 +1149,8 @@ function jobStatus(
   }
 }
 
-function formatTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+function formatTime(value: string, locale: string): string {
+  return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));

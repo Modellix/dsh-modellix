@@ -23,7 +23,7 @@ function settingsSnapshot(overrides: Record<string, unknown> = {}): object {
       verification: "valid",
       invalidEpoch: null,
     },
-    onboarding: { status: "completed", recoveryPending: false },
+    onboarding: { status: "completed", recoveryPending: false, recoveryRequestId: null },
     llm: { health: "ready", modelCount: 18, refreshedAt: 1_787_616_000_000 },
     ...overrides,
   };
@@ -193,6 +193,43 @@ describe("Modellix Client Design wire", () => {
     expect(parsed.selectedModelId).toBe("openai/gpt-image-2");
     expect(parsed.draft?.parameters).toEqual({ "/prompt": "A quiet landscape" });
     expect(parsed.jobs[0]?.resources[0]?.url).toContain("https://cdn.example/");
+  });
+
+  it("accepts only stable localizable Design presentation codes", () => {
+    const base = designSnapshot() as {
+      models: readonly Record<string, unknown>[];
+      jobs: readonly Record<string, unknown>[];
+    };
+    const coded = designSnapshot({
+      notice: "catalog-stale",
+      models: [{
+        ...base.models[0],
+        available: false,
+        unavailableReason: "removed-from-catalog",
+      }],
+      jobs: [{
+        ...base.jobs[0],
+        diagnostic: { code: "task-inaccessible", retryable: false },
+      }],
+    });
+    expect(parseDesignSnapshot(coded)).toMatchObject({
+      notice: "catalog-stale",
+      models: [{ unavailableReason: "removed-from-catalog" }],
+      jobs: [{ diagnostic: { code: "task-inaccessible", retryable: false } }],
+    });
+    expect(() => parseDesignSnapshot(designSnapshot({ notice: "Host prose" }))).toThrow(
+      ModellixClientContractError,
+    );
+    expect(() => parseDesignSnapshot(designSnapshot({
+      jobs: [{
+        ...base.jobs[0],
+        diagnostic: {
+          code: "task-inaccessible",
+          message: "Host prose must not cross the wire",
+          retryable: false,
+        },
+      }],
+    }))).toThrow(/stable code/u);
   });
 
   it("rejects catalog/draft disagreement and unknown selected models", () => {

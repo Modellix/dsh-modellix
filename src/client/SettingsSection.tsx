@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -17,7 +18,7 @@ import {
   type StateDotState,
 } from "@deepseek-ai/dsh-client-ui-primitives";
 
-import { useDialogA11y } from "./a11y.js";
+import { useDialogA11y, useExternalDialogGate } from "./a11y.js";
 import type {
   ServiceTogglesWire,
   SettingsSnapshotWire,
@@ -32,6 +33,10 @@ import {
   type ModellixTranslate,
 } from "./shared.js";
 import type { SettingsController } from "./store.js";
+import {
+  credentialDialogCoordinatorFor,
+  useCredentialDialogSnapshot,
+} from "./credential-dialog.js";
 
 export type ModellixSettingsProps = PropsRuntime<"settings.section"> &
   PropsLocale<"modellix"> & {
@@ -45,9 +50,15 @@ export function ModellixSettingsSection({
   const state = useResourceState(controller.store);
   const snapshot = state.data;
   const [services, setServices] = useState<ServiceTogglesWire | null>(null);
-  const [credentialOpen, setCredentialOpen] = useState(false);
-  const [removeOpen, setRemoveOpen] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const credentialDialogOwner = `settings:${useId()}`;
+  const removeDialogOwner = `settings-remove:${useId()}`;
+  const credentialDialogs = credentialDialogCoordinatorFor(controller);
+  const credentialDialog = useCredentialDialogSnapshot(credentialDialogs);
+  const credentialOpen = credentialDialog.activeOwner === credentialDialogOwner;
+  const removeOpen = credentialDialog.activeOwner === removeDialogOwner;
+  const credentialRecovery =
+    credentialOpen && credentialDialog.recoveryToken !== null;
 
   useEffect(() => {
     if (controller.store.getSnapshot().status !== "idle") return;
@@ -55,6 +66,14 @@ export function ModellixSettingsSection({
     void controller.load(abort.signal);
     return () => abort.abort();
   }, [controller]);
+
+  useEffect(
+    () => () => {
+      credentialDialogs.release(credentialDialogOwner);
+      credentialDialogs.release(removeDialogOwner);
+    },
+    [credentialDialogOwner, credentialDialogs, removeDialogOwner],
+  );
 
   useEffect(() => {
     if (snapshot !== null) setServices(snapshot.services);
@@ -118,9 +137,13 @@ export function ModellixSettingsSection({
           {canWriteCredential && (
             <Button
               type="button"
-              variant={credential.verification === "invalid" ? "primary" : "outline"}
+              variant={
+                !credential.configured || credential.verification === "invalid"
+                  ? "primary"
+                  : "outline"
+              }
               disabled={busy}
-              onClick={() => setCredentialOpen(true)}
+              onClick={() => credentialDialogs.open(credentialDialogOwner)}
             >
               {credential.configured ? t("replaceKey") : t("configureKey")}
             </Button>
@@ -130,7 +153,7 @@ export function ModellixSettingsSection({
               type="button"
               variant="ghost"
               disabled={busy}
-              onClick={() => setRemoveOpen(true)}
+              onClick={() => credentialDialogs.open(removeDialogOwner)}
             >
               {t("removeKey")}
             </Button>
@@ -151,7 +174,11 @@ export function ModellixSettingsSection({
         <div className="mdlx-actions">
           <Button
             type="button"
-            variant="primary"
+            variant={
+              !credential.configured || credential.verification === "invalid"
+                ? "outline"
+                : "primary"
+            }
             disabled={busy || !servicesChanged}
             aria-busy={state.pending === "save-toggles"}
             onClick={saveServices}
@@ -163,6 +190,7 @@ export function ModellixSettingsSection({
 
       <LlmCatalogCard
         snapshot={snapshot}
+        dateLocale={t("dateLocale")}
         busy={state.pending === "refresh-llm"}
         disabled={llmRefreshDisabled}
         onRefresh={() => {
@@ -181,9 +209,15 @@ export function ModellixSettingsSection({
 
       <CredentialModal
         open={credentialOpen}
-        mandatory={credential.verification === "invalid"}
+        mandatory={credentialRecovery || credential.verification === "invalid"}
         title={credential.configured ? t("replaceKey") : t("configureKey")}
-        description={t("onboardingDescription")}
+        description={
+          credentialRecovery
+            ? credential.configured
+              ? t("errorKeyInvalid")
+              : t("keyRequired")
+            : t("onboardingDescription")
+        }
         busy={state.pending === "replace-credential"}
         errorCode={
           state.errorOperation === "replace-credential" ? state.errorCode : null
@@ -196,10 +230,11 @@ export function ModellixSettingsSection({
           )
         }
         onSaved={() => {
-          setCredentialOpen(false);
+          credentialDialogs.completeCredential(credentialDialogOwner);
           setAnnouncement(t("saved"));
         }}
-        onCancel={() => setCredentialOpen(false)}
+        onCancel={() => credentialDialogs.dismissCredential(credentialDialogOwner)}
+        laterLabel={credentialRecovery ? "later" : "cancel"}
         t={t}
       />
 
@@ -209,14 +244,14 @@ export function ModellixSettingsSection({
         errorCode={
           state.errorOperation === "remove-credential" ? state.errorCode : null
         }
-        onClose={() => setRemoveOpen(false)}
+        onClose={() => credentialDialogs.close(removeDialogOwner)}
         onConfirm={() => {
           if (state.pending !== null) return;
           void controller
             .removeCredential(credential.credentialEpoch)
             .then((accepted) => {
               if (!accepted) return;
-              setRemoveOpen(false);
+              credentialDialogs.close(removeDialogOwner);
               setAnnouncement(t("saved"));
             });
         }}
@@ -228,12 +263,14 @@ export function ModellixSettingsSection({
 
 function LlmCatalogCard({
   snapshot,
+  dateLocale,
   busy,
   disabled,
   onRefresh,
   t,
 }: {
   snapshot: SettingsSnapshotWire;
+  dateLocale: string;
   busy: boolean;
   disabled: boolean;
   onRefresh: () => void;
@@ -252,11 +289,11 @@ function LlmCatalogCard({
     () =>
       snapshot.llm.refreshedAt === null
         ? null
-        : new Intl.DateTimeFormat(undefined, {
+        : new Intl.DateTimeFormat(dateLocale, {
             dateStyle: "medium",
             timeStyle: "short",
           }).format(new Date(snapshot.llm.refreshedAt)),
-    [snapshot.llm.refreshedAt],
+    [dateLocale, snapshot.llm.refreshedAt],
   );
   return (
     <section className="mdlx-card" aria-labelledby="mdlx-llm-title">
@@ -307,8 +344,9 @@ function RemoveCredentialDialog({
   t: ModellixTranslate;
 }): ReactNode {
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const surfaceOpen = useExternalDialogGate(open);
   useDialogA11y({
-    open,
+    open: surfaceOpen,
     container: contentRef,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory: false,
@@ -316,14 +354,19 @@ function RemoveCredentialDialog({
   });
   return (
     <Modal
-      open={open}
+      open={surfaceOpen}
       title={t("removeTitle")}
       closeLabel={t("cancel")}
       onClose={onClose}
       headless
       className="mdlx-modal mdlx-modal-confirm"
     >
-      <div ref={contentRef} className="mdlx-modal-content" tabIndex={-1}>
+      <div
+        ref={contentRef}
+        className="mdlx-modal-content"
+        data-mdlx-dialog-surface=""
+        tabIndex={-1}
+      >
         <div className="mdlx-heading">
           <h2 className="mdlx-modal-title">{t("removeTitle")}</h2>
           <p className="mdlx-modal-description">{t("removeDescription")}</p>

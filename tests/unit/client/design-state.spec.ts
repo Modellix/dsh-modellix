@@ -77,7 +77,7 @@ describe("Modellix Design Client state", () => {
       models: [{
         ...snapshot().models[0]!,
         available: false,
-        unavailableReason: "Removed from catalog",
+        unavailableReason: "removed-from-catalog",
       }],
     });
     expect(selectedDesignModel(unavailable)?.available).toBe(false);

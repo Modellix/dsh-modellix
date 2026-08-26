@@ -5,7 +5,7 @@ import type {
 } from "@deepseek-ai/dsh-client-ui-slots";
 import { Button, Modal } from "@deepseek-ai/dsh-client-ui-primitives";
 
-import { useDialogA11y } from "./a11y.js";
+import { useDialogA11y, useExternalDialogGate } from "./a11y.js";
 import type { ServiceTogglesWire } from "./contracts.js";
 import { shouldPromptOnboarding } from "./onboarding-state.js";
 import {
@@ -147,8 +147,9 @@ function OnboardingLoadRecoveryDialog({
   t: ModellixTranslate;
 }): ReactNode {
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const surfaceOpen = useExternalDialogGate(true);
   useDialogA11y({
-    open: true,
+    open: surfaceOpen,
     container: contentRef,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory: true,
@@ -156,13 +157,18 @@ function OnboardingLoadRecoveryDialog({
   });
   return (
     <Modal
-      open
+      open={surfaceOpen}
       title={t("onboardingLoadErrorTitle")}
       onClose={() => undefined}
       headless
       className="mdlx-modal mdlx-modal-confirm"
     >
-      <div ref={contentRef} className="mdlx-modal-content" tabIndex={-1}>
+      <div
+        ref={contentRef}
+        className="mdlx-modal-content"
+        data-mdlx-dialog-surface=""
+        tabIndex={-1}
+      >
         <div className="mdlx-heading">
           <h2 className="mdlx-modal-title">{t("onboardingLoadErrorTitle")}</h2>
           <p className="mdlx-modal-description">{t("onboardingLoadErrorDescription")}</p>
@@ -205,8 +211,9 @@ export function OnboardingReadonlyCredentialDialog({
   t: ModellixTranslate;
 }): ReactNode {
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const surfaceOpen = useExternalDialogGate(open);
   useDialogA11y({
-    open,
+    open: surfaceOpen,
     container: contentRef,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory: true,
@@ -214,13 +221,18 @@ export function OnboardingReadonlyCredentialDialog({
   });
   return (
     <Modal
-      open={open}
+      open={surfaceOpen}
       title={t("readonlyKeyTitle")}
       onClose={() => undefined}
       headless
       className="mdlx-modal mdlx-modal-confirm"
     >
-      <div ref={contentRef} className="mdlx-modal-content" tabIndex={-1}>
+      <div
+        ref={contentRef}
+        className="mdlx-modal-content"
+        data-mdlx-dialog-surface=""
+        tabIndex={-1}
+      >
         <div className="mdlx-heading">
           <h2 className="mdlx-modal-title">{t("readonlyKeyTitle")}</h2>
           <p className="mdlx-modal-description">{description}</p>

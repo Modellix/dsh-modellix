@@ -17,7 +17,11 @@ import {
   type StateDotState,
 } from "@deepseek-ai/dsh-client-ui-primitives";
 
-import { clearSecretInput, useDialogA11y } from "./a11y.js";
+import {
+  clearSecretInput,
+  useDialogA11y,
+  useExternalDialogGate,
+} from "./a11y.js";
 import { presentClientError } from "./client-errors.js";
 import type { ServiceTogglesWire } from "./contracts.js";
 import type { ModellixLocaleKey } from "./locales.js";
@@ -207,13 +211,14 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
   const [displayedErrorCode, setDisplayedErrorCode] = useState<string | null>(
     errorCode,
   );
-  const contentRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLFormElement | null>(null);
   const draftRef = useRef("");
   const keyId = useId();
   const helpId = `${keyId}-help`;
   const errorId = `${keyId}-error`;
   const errorPresentation =
     displayedErrorCode === null ? null : presentClientError(displayedErrorCode);
+  const surfaceOpen = useExternalDialogGate(open);
 
   const clear = useCallback((): void => {
     draftRef.current = "";
@@ -227,7 +232,7 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
     onCancel();
   }, [clear, onCancel]);
   useDialogA11y({
-    open,
+    open: surfaceOpen,
     container: contentRef,
     initialFocusSelector: "[data-mdlx-initial-focus]",
     mandatory,
@@ -252,16 +257,22 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
 
   return (
     <Modal
-      open={open}
+      open={surfaceOpen}
       title={title}
       onClose={mandatory ? () => undefined : close}
       headless
       className="mdlx-modal"
     >
-      <div
+      <form
         ref={contentRef}
         className="mdlx-modal-content"
+        data-mdlx-dialog-surface=""
         tabIndex={-1}
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
       >
         <div className="mdlx-heading">
           <h2 className="mdlx-modal-title">{title}</h2>
@@ -272,6 +283,7 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
           <div className="mdlx-input-row">
             <Input
               id={keyId}
+              name="modellix-api-key"
               className="mdlx-input"
               type={visible ? "text" : "password"}
               value={draft}
@@ -287,12 +299,6 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
                 draftRef.current = value;
                 setDraft(value);
                 setDisplayedErrorCode(null);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void submit();
-                }
               }}
             />
             <Button
@@ -334,17 +340,16 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
             {t(laterLabel)}
           </Button>
           <Button
-            type="button"
+            type="submit"
             variant="primary"
             disabled={busy || draft.trim().length === 0}
             aria-busy={busy}
-            onClick={() => { void submit(); }}
           >
             {busy ? t("saving") : t("saveEnable")}
           </Button>
         </div>
         <BusyStatus busy={busy} text={t("saving")} />
-      </div>
+      </form>
     </Modal>
   );
 }

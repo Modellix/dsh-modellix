@@ -1,3 +1,15 @@
+import {
+  DESIGN_DIAGNOSTIC_CODES,
+  DESIGN_FIELD_DISABLED_CODES,
+  DESIGN_MODEL_UNAVAILABLE_CODES,
+  DESIGN_NOTICE_CODES,
+  type DesignDiagnosticCode,
+  type DesignFieldDisabledCode,
+  type DesignModelUnavailableCode,
+  type DesignNoticeCode,
+} from "../shared/design-presentation-codes.js";
+import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";
+
 export const MODELLIX_CLIENT_WIRE_VERSION = 1 as const;
 export const MODELLIX_RPC_CHANNEL = "/modellix" as const;
 
@@ -51,6 +63,7 @@ export interface SettingsSnapshotWire {
   readonly onboarding: {
     readonly status: "active" | "completed" | "deferred";
     readonly recoveryPending: boolean;
+    readonly recoveryRequestId: string | null;
   };
   readonly llm: {
     readonly health:
@@ -79,7 +92,7 @@ export interface DesignModelWire {
   readonly kind: "image" | "video" | "audio" | "unknown";
   readonly featured: boolean;
   readonly available: boolean;
-  readonly unavailableReason: string | null;
+  readonly unavailableReason: DesignModelUnavailableCode | null;
 }
 
 export interface DesignEnumOptionWire {
@@ -107,7 +120,7 @@ export interface DesignFieldWire {
   readonly maximum: number | null;
   readonly step: number | null;
   readonly maxLength: number | null;
-  readonly disabledReason: string | null;
+  readonly disabledReason: DesignFieldDisabledCode | null;
 }
 
 export interface DesignDraftWire {
@@ -144,8 +157,7 @@ export interface DesignResourceWire {
 }
 
 export interface DesignDiagnosticWire {
-  readonly code: string;
-  readonly message: string;
+  readonly code: DesignDiagnosticCode;
   readonly retryable: boolean;
 }
 
@@ -174,7 +186,7 @@ export interface DesignSnapshotWire {
   readonly draft: DesignDraftWire | null;
   readonly proposal: DesignProposalWire | null;
   readonly jobs: readonly DesignJobWire[];
-  readonly notice: string | null;
+  readonly notice: DesignNoticeCode | null;
 }
 
 export type DesignMutationWire =
@@ -325,7 +337,9 @@ export function parseDesignSnapshot(input: unknown): DesignSnapshotWire {
     proposal: root.proposal === null ? null : parseProposal(root.proposal),
     jobs: array(root.jobs, "jobs", MAX_JOBS).map(parseJob),
     notice:
-      root.notice === null ? null : readable(root.notice, "notice", MAX_SHORT_TEXT),
+      root.notice === null
+        ? null
+        : oneOf(root.notice, DESIGN_NOTICE_CODES, "notice"),
   };
 }
 
@@ -440,6 +454,10 @@ function parseOnboarding(value: unknown): SettingsSnapshotWire["onboarding"] {
       onboarding.recoveryPending,
       "onboarding.recoveryPending",
     ),
+    recoveryRequestId:
+      onboarding.recoveryRequestId === null
+        ? null
+        : safeId(onboarding.recoveryRequestId, "onboarding.recoveryRequestId"),
   };
 }
 
@@ -479,10 +497,10 @@ function parseModel(value: unknown): DesignModelWire {
     unavailableReason:
       model.unavailableReason === null
         ? null
-        : readable(
+        : oneOf(
             model.unavailableReason,
+            DESIGN_MODEL_UNAVAILABLE_CODES,
             "model.unavailableReason",
-            MAX_SHORT_TEXT,
           ),
   };
 }
@@ -572,7 +590,11 @@ function parseField(value: unknown): DesignFieldWire {
     disabledReason:
       field.disabledReason === null
         ? null
-        : readable(field.disabledReason, "field.disabledReason", MAX_SHORT_TEXT),
+        : oneOf(
+            field.disabledReason,
+            DESIGN_FIELD_DISABLED_CODES,
+            "field.disabledReason",
+          ),
   };
 }
 
@@ -659,9 +681,13 @@ function parseResource(value: unknown): DesignResourceWire {
 
 function parseDiagnostic(value: unknown): DesignDiagnosticWire {
   const diagnostic = object(value, "diagnostic");
+  if (Object.hasOwn(diagnostic, "message")) {
+    throw new ModellixClientContractError(
+      "diagnostic must use a stable code instead of Host prose",
+    );
+  }
   return {
-    code: safeId(diagnostic.code, "diagnostic.code"),
-    message: readable(diagnostic.message, "diagnostic.message", MAX_SHORT_TEXT),
+    code: oneOf(diagnostic.code, DESIGN_DIAGNOSTIC_CODES, "diagnostic.code"),
     retryable: boolean(diagnostic.retryable, "diagnostic.retryable"),
   };
 }
@@ -868,4 +894,3 @@ function version(value: unknown): void {
     throw new ModellixClientContractError("RPC wire version is unsupported");
   }
 }
-import { DESIGN_WIRE_LIMITS } from "../shared/design-wire-limits.js";

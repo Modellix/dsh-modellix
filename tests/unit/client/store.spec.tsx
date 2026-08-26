@@ -24,7 +24,7 @@ function state(revision: number): object {
       verification: "unknown",
       invalidEpoch: null,
     },
-    onboarding: { status: "active", recoveryPending: false },
+    onboarding: { status: "active", recoveryPending: false, recoveryRequestId: null },
     llm: { health: "missing", modelCount: 0, refreshedAt: null },
   };
 }
@@ -270,6 +270,52 @@ describe("Modellix Client resource controllers", () => {
     });
   });
 
+  it("fences synchronous concurrent Design submits before a second Client RPC", async () => {
+    const paidSubmission = deferred<RpcResult<unknown>>();
+    const endpoints: string[] = [];
+    const rpc = rpcFrom(async (_channel, endpoint) => {
+      endpoints.push(endpoint);
+      if (endpoint === "design/submit") return paidSubmission.promise;
+      return { ok: true, value: design() };
+    });
+    const controller = new DesignController(rpc, "session-concurrent");
+    await controller.load();
+
+    const first = controller.submit({ "/prompt": "Submit exactly once" });
+    const second = controller.submit({ "/prompt": "Submit exactly once" });
+
+    await expect(second).resolves.toBe(false);
+    expect(endpoints.filter((endpoint) => endpoint === "design/submit")).toHaveLength(1);
+    paidSubmission.resolve({ ok: true, value: design() });
+    await expect(first).resolves.toBe(true);
+    expect(controller.store.getSnapshot().pending).toBeNull();
+  });
+
+  it("fences synchronous concurrent Design proposals before a second paid Client RPC", async () => {
+    const paidProposal = deferred<RpcResult<unknown>>();
+    const endpoints: string[] = [];
+    const rpc = rpcFrom(async (_channel, endpoint) => {
+      endpoints.push(endpoint);
+      if (endpoint === "design/propose") return paidProposal.promise;
+      return { ok: true, value: design() };
+    });
+    const controller = new DesignController(rpc, "session-propose-concurrent");
+    await controller.load();
+
+    const first = controller.propose("Use cinematic lighting", {
+      "/prompt": "A city at night",
+    });
+    const second = controller.propose("Use cinematic lighting", {
+      "/prompt": "A city at night",
+    });
+
+    await expect(second).resolves.toBe(false);
+    expect(endpoints.filter((endpoint) => endpoint === "design/propose")).toHaveLength(1);
+    paidProposal.resolve({ ok: true, value: design() });
+    await expect(first).resolves.toBe(true);
+    expect(controller.store.getSnapshot().pending).toBeNull();
+  });
+
   it("publishes the Design catalog refresh operation", async () => {
     const endpoints: string[] = [];
     const rpc = rpcFrom(async (_channel, endpoint) => {
@@ -294,7 +340,7 @@ describe("Modellix Client resource controllers", () => {
       models: Array<{ available: boolean; unavailableReason: string | null }>;
     };
     unavailable.models[0]!.available = false;
-    unavailable.models[0]!.unavailableReason = "Removed from catalog";
+    unavailable.models[0]!.unavailableReason = "removed-from-catalog";
     const endpoints: string[] = [];
     const rpc = rpcFrom(async (_channel, endpoint) => {
       endpoints.push(endpoint);

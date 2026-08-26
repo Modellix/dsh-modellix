@@ -55,5 +55,9 @@ describe("Modellix Client error presentation", () => {
     expect(presentClientError("MODELLIX_DESIGN_SCHEMA_INVALID").messageKey).toBe(
       "errorDesignSchema",
     );
+    expect(presentClientError("MODELLIX_SUBMIT_UNKNOWN")).toEqual({
+      messageKey: "errorSubmitUnknown",
+      credentialFieldInvalid: false,
+    });
   });
 });
