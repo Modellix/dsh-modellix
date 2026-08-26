@@ -80,6 +80,37 @@ describe("ModelCatalogClient", () => {
     expect(new Headers(fallbackInit?.headers).has("authorization")).toBe(false);
   });
 
+  it("maps the live task-type catalog to media categories and filters locally", async () => {
+    const fetchMock = vi.fn<FetchPort>().mockResolvedValue(
+      jsonResponse({
+        models: [
+          { slug: "openai/gpt-image-2", type: "text-to-image" },
+          { slug: "acme/image-editor", type: "image-to-image" },
+          { slug: "acme/movie", type: "text-to-video" },
+          { slug: "acme/animate", type: "image-to-video" },
+          { slug: "acme/restyle", type: "video-to-video" },
+          { slug: "acme/voice", type: "text-to-speech" },
+          { slug: "acme/transcribe", type: "speech-to-text" },
+          { slug: "acme/dub", type: "speech-to-speech" },
+          { slug: "acme/unsupported", type: "text-to-3d" },
+        ],
+      }),
+    );
+    const client = new ModelCatalogClient({
+      fetch: fetchMock,
+      getApiKey: () => "key",
+    });
+
+    await expect(client.list({ category: "video" })).resolves.toMatchObject({
+      hasMore: false,
+      items: [
+        { slug: "acme/movie", categories: ["video"] },
+        { slug: "acme/animate", categories: ["video"] },
+        { slug: "acme/restyle", categories: ["video"] },
+      ],
+    });
+  });
+
   it("requires a key when public fallback was not explicitly enabled", async () => {
     const client = new ModelCatalogClient({
       fetch: vi.fn<FetchPort>(),

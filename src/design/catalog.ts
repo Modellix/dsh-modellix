@@ -200,7 +200,8 @@ export function parseCatalogPage(
 
   const items = rawItems
     .map((item) => parseModel(item, query.category))
-    .filter((item): item is DesignModelSummary => item !== null);
+    .filter((item): item is DesignModelSummary =>
+      item !== null && item.categories.includes(query.category));
   const total = finiteNonNegativeInteger(
     data?.total ?? data?.total_count ?? envelope?.total,
   );
@@ -279,17 +280,39 @@ function parseCategories(
   value: unknown,
   fallback: DesignMediaCategory,
 ): readonly DesignMediaCategory[] {
+  if (value === undefined || value === null) {
+    return [fallback];
+  }
   const candidates = Array.isArray(value) ? value : [value];
   const result = new Set<DesignMediaCategory>();
   for (const candidate of candidates) {
-    if (candidate === "image" || candidate === "video" || candidate === "audio") {
-      result.add(candidate);
-    }
-  }
-  if (result.size === 0) {
-    result.add(fallback);
+    const category = mediaCategory(candidate);
+    if (category !== null) result.add(category);
   }
   return [...result];
+}
+
+function mediaCategory(value: unknown): DesignMediaCategory | null {
+  if (typeof value !== "string") return null;
+  switch (value.trim().toLowerCase()) {
+    case "image":
+    case "text-to-image":
+    case "image-to-image":
+      return "image";
+    case "video":
+    case "text-to-video":
+    case "image-to-video":
+    case "video-to-video":
+      return "video";
+    case "audio":
+    case "speech":
+    case "text-to-speech":
+    case "speech-to-text":
+    case "speech-to-speech":
+      return "audio";
+    default:
+      return null;
+  }
 }
 
 function normalizeQuery(query: ModelCatalogQuery): Required<ModelCatalogQuery> {
