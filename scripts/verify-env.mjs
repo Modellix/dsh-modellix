@@ -13,6 +13,8 @@ const expected = Object.freeze({
 const harnessPeers = Object.freeze([
   '@deepseek-ai/dsh-api-remotes',
   '@deepseek-ai/dsh-anonymous-user-id',
+  '@deepseek-ai/dsh-agent',
+  '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-client-connection',
   '@deepseek-ai/dsh-client-locale',
   '@deepseek-ai/dsh-client-runtime',

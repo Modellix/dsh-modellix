@@ -2,10 +2,12 @@ import type { JsonValue, ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  MODELLIX_DESIGN_GENERATE_TOOL,
-  MODELLIX_DESIGN_MODELS_TOOL,
-  MODELLIX_DESIGN_PREPARE_TOOL,
-  MODELLIX_DESIGN_TASK_TOOL,
+  MODELLIX_MEDIA_GENERATE_TOOL,
+  MODELLIX_MEDIA_GET_RESULT_TOOL,
+  MODELLIX_MEDIA_LIST_TOOL,
+  MODELLIX_MEDIA_PREPARE_TOOL,
+  MODELLIX_MEDIA_SCHEMA_TOOL,
+  MODELLIX_MEDIA_UPLOAD_FILE_TOOL,
   createModellixDesignToolDefinitions,
   type DesignToolController,
 } from "../../../src/host/design-tool.js";
@@ -34,12 +36,12 @@ function renderText(definition: ToolDefinition, value: JsonValue): string {
 }
 
 describe("Modellix Design tool presentation", () => {
-  it("renders catalog availability, truncation, and compact schema context", () => {
-    const models = tool(tools(), MODELLIX_DESIGN_MODELS_TOOL);
+  it("renders catalog availability and truncation", () => {
+    const models = tool(tools(), MODELLIX_MEDIA_LIST_TOOL);
     const rich = renderText(models, {
       version: 1,
-      service: "design",
-      operation: "models",
+      service: "media",
+      operation: "list",
       models: [
         {
           modelId: "openai/gpt-image-2",
@@ -58,7 +60,28 @@ describe("Modellix Design tool presentation", () => {
         },
       ],
       truncated: true,
-      selectedModelId: "openai/gpt-image-2",
+    });
+
+    expect(rich).toContain("openai/gpt-image-2 (image)");
+    expect(rich).toContain("retired/example (video) — unavailable");
+    expect(rich).toContain("Results truncated; refine the query.");
+    expect(renderText(models, {
+      version: 1,
+      service: "media",
+      operation: "list",
+      models: [],
+      truncated: false,
+    })).toBe("No matching Modellix media models.");
+  });
+
+  it("renders compact schema context independently from the model list", () => {
+    const schema = tool(tools(), MODELLIX_MEDIA_SCHEMA_TOOL);
+    const rich = renderText(schema, {
+      version: 1,
+      service: "media",
+      operation: "schema",
+      modelId: "openai/gpt-image-2",
+      available: true,
       schema: {
         modelId: "openai/gpt-image-2",
         irContractHash: "a".repeat(64),
@@ -77,31 +100,40 @@ describe("Modellix Design tool presentation", () => {
             kind: "enum",
             required: false,
             options: ["low", "high"],
+            description: "Choose one of the published quality presets.",
           },
         ],
         truncated: true,
       },
     });
 
-    expect(rich).toContain("openai/gpt-image-2 (image)");
-    expect(rich).toContain("retired/example (video) — unavailable");
-    expect(rich).toContain("Results truncated; refine the query.");
-    expect(rich).toContain("primary input /prompt");
-    expect(rich).toContain("/prompt, /quality (truncated)");
-    expect(renderText(models, {
+    expect(rich).toContain("Primary input: /prompt");
+    expect(rich).toContain("/prompt (string; required)");
+    expect(rich).toContain('/quality (enum; optional; allowed values: "low", "high")');
+    expect(rich).toContain("Choose one of the published quality presets.");
+    expect(rich).toContain("The field list is truncated.");
+  });
+
+  it("renders an unsupported schema as a recoverable model-selection result", () => {
+    const schema = tool(tools(), MODELLIX_MEDIA_SCHEMA_TOOL);
+    const text = renderText(schema, {
       version: 1,
-      service: "design",
-      operation: "models",
-      models: [],
-      truncated: false,
-    })).toBe("No matching Modellix Design models.");
+      service: "media",
+      operation: "schema",
+      modelId: "alibaba/qwen-image-3.0-pro",
+      available: false,
+      unavailableReason: "Choose another compatible model.",
+    });
+
+    expect(text).toContain("Schema for alibaba/qwen-image-3.0-pro is unavailable");
+    expect(text).toContain("Choose another compatible model.");
   });
 
   it("renders proposal changes and conflicts while preserving the confirmation warning", () => {
-    const prepare = tool(tools(), MODELLIX_DESIGN_PREPARE_TOOL);
+    const prepare = tool(tools(), MODELLIX_MEDIA_PREPARE_TOOL);
     const changed = renderText(prepare, {
       version: 1,
-      service: "design",
+      service: "media",
       operation: "prepare",
       modelId: "openai/gpt-image-2",
       irContractHash: "b".repeat(64),
@@ -122,7 +154,7 @@ describe("Modellix Design tool presentation", () => {
     expect(changed).toContain("explicitly confirm before generation");
     expect(renderText(prepare, {
       version: 1,
-      service: "design",
+      service: "media",
       operation: "prepare",
       modelId: "openai/gpt-image-2",
       irContractHash: "d".repeat(64),
@@ -136,10 +168,10 @@ describe("Modellix Design tool presentation", () => {
   });
 
   it("renders generation resources and diagnostics without weakening the no-retry rule", () => {
-    const generate = tool(tools(), MODELLIX_DESIGN_GENERATE_TOOL);
+    const generate = tool(tools(), MODELLIX_MEDIA_GENERATE_TOOL);
     const completed = renderText(generate, {
       version: 1,
-      service: "design",
+      service: "media",
       operation: "generate",
       modelId: "openai/gpt-image-2",
       submitted: true,
@@ -162,10 +194,10 @@ describe("Modellix Design tool presentation", () => {
     expect(completed).toContain("succeeded (task-123)");
     expect(completed).toContain("One optional result was unavailable.");
     expect(completed).toContain("image: https://cdn.example.test/result.png");
-    expect(completed).toContain("Do not automatically repeat this paid submission.");
+    expect(completed).toContain("Do not automatically repeat this submission.");
     expect(renderText(generate, {
       version: 1,
-      service: "design",
+      service: "media",
       operation: "generate",
       modelId: "openai/gpt-image-2",
       submitted: true,
@@ -173,23 +205,37 @@ describe("Modellix Design tool presentation", () => {
       status: "submit-unknown",
       resources: [],
     })).toBe(
-      "Modellix Design status: submit-unknown.\nDo not automatically repeat this paid submission.",
+      "Modellix media status: submit-unknown.\nDo not automatically repeat this submission.",
     );
+    const accepted = renderText(generate, {
+      version: 1,
+      service: "media",
+      operation: "generate",
+      modelId: "openai/gpt-image-2",
+      submitted: true,
+      noAutomaticRetry: true,
+      status: "running",
+      jobId: "task-live",
+      resources: [],
+    });
+    expect(accepted).toContain("submission accepted (task-live)");
+    expect(accepted).toContain("do not use queued, running, generating");
+    expect(accepted).not.toContain("status: running");
   });
 
-  it("renders missing and persisted task outcomes and all four pending call cards", () => {
+  it("renders missing and persisted task outcomes and all six pending call cards", () => {
     const definitions = tools();
-    const task = tool(definitions, MODELLIX_DESIGN_TASK_TOOL);
+    const task = tool(definitions, MODELLIX_MEDIA_GET_RESULT_TOOL);
     expect(renderText(task, {
       version: 1,
-      service: "design",
-      operation: "task",
+      service: "media",
+      operation: "get_result",
       found: false,
-    })).toBe("No persisted Modellix Design task matched that identifier.");
+    })).toBe("No persisted Modellix media task matched that identifier.");
     expect(renderText(task, {
       version: 1,
-      service: "design",
-      operation: "task",
+      service: "media",
+      operation: "get_result",
       found: true,
       job: {
         jobId: "task-456",
@@ -200,22 +246,42 @@ describe("Modellix Design tool presentation", () => {
         resources: [{ kind: "video", url: "https://cdn.example.test/result.mp4" }],
       },
     })).toContain("task-456: succeeded.\n- video: https://cdn.example.test/result.mp4");
+    expect(renderText(task, {
+      version: 1,
+      service: "media",
+      operation: "get_result",
+      found: true,
+      job: {
+        jobId: "task-running",
+        modelId: "openai/gpt-image-2",
+        status: "running",
+        createdAt: "2026-08-26T00:00:00.000Z",
+        updatedAt: "2026-08-26T00:01:00.000Z",
+        resources: [],
+      },
+    })).toContain("Do not inspect it again or start a replacement in this turn");
 
-    const models = tool(definitions, MODELLIX_DESIGN_MODELS_TOOL);
+    const models = tool(definitions, MODELLIX_MEDIA_LIST_TOOL);
     expect(models.presentCall?.({ query: "image" })).toMatchObject({
       card: "generic",
-      title: "Browse Modellix Design models",
+      title: "Browse Modellix media models",
       kind: "search",
       rawInput: "image",
     });
-    expect(models.presentCall?.({ model: "openai/gpt-image-2" })).toMatchObject({
-      title: "Inspect openai/gpt-image-2",
+    expect(tool(definitions, MODELLIX_MEDIA_SCHEMA_TOOL).presentCall?.({
+      model: "openai/gpt-image-2",
+    })).toMatchObject({
+      title: "Inspect openai/gpt-image-2 schema",
+      kind: "read",
     });
-    expect(tool(definitions, MODELLIX_DESIGN_PREPARE_TOOL).presentCall?.({
+    expect(tool(definitions, MODELLIX_MEDIA_PREPARE_TOOL).presentCall?.({
       model: "openai/gpt-image-2",
       instruction: "make it square",
     })).toMatchObject({ title: "Prepare openai/gpt-image-2", kind: "execute" });
-    expect(tool(definitions, MODELLIX_DESIGN_GENERATE_TOOL).presentCall?.({
+    expect(tool(definitions, MODELLIX_MEDIA_UPLOAD_FILE_TOOL).presentCall?.({
+      attachment_id: "attachment-1",
+    })).toMatchObject({ title: "Upload media to Modellix", kind: "execute" });
+    expect(tool(definitions, MODELLIX_MEDIA_GENERATE_TOOL).presentCall?.({
       model: "openai/gpt-image-2",
     })).toMatchObject({ title: "Generate with openai/gpt-image-2", kind: "execute" });
     expect(task.presentCall?.({ task_id: "task-456" })).toMatchObject({

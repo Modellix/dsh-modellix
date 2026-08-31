@@ -75,7 +75,7 @@ describe("Modellix Design presentation", () => {
   it("raises coarse-pointer targets to at least 48 CSS pixels", () => {
     const coarseRule = MODELLIX_CLIENT_CSS.match(/@media \(pointer:coarse\)\{([^}]|\}(?!\s*@media))*\}/u)?.[0] ?? "";
     for (const selector of [
-      ".mdlx-settings button,.mdlx-design button,.mdlx-modal-content button",
+      ".mdlx-settings button,.mdlx-design button,.mdlx-design-drawer button,.mdlx-tool-result button,.mdlx-modal-content button",
       ".mdlx-input",
       ".mdlx-select",
       ".mdlx-native-input",

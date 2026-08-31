@@ -1,6 +1,7 @@
 export * from "./catalog.js";
 export * from "./errors.js";
 export * from "./model-schema.js";
+export * from "./media-upload-client.js";
 export * from "./parameter-planner.js";
 export * from "./planner-client.js";
 export * from "./ports.js";

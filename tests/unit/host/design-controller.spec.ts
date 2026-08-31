@@ -422,11 +422,16 @@ describe("DesignHostController", () => {
     const restarted = controllerHarness(fetchMock, { values: harness.values });
     const recovered = await restarted.controller.handle("design/read", {
       version: 1,
-      sessionId: "session-after-restart",
+      sessionId: "session-unknown",
     });
     expect(recovered.jobs).toEqual([
       expect.objectContaining({ status: "submit-unknown" }),
     ]);
+    const otherSession = await restarted.controller.handle("design/read", {
+      version: 1,
+      sessionId: "session-after-restart",
+    });
+    expect(otherSession.jobs).toEqual([]);
     expect(paidPosts).toBe(1);
     assertNoSecretOnWire(recovered, restarted.values);
   });

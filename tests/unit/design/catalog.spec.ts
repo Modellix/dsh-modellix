@@ -104,9 +104,9 @@ describe("ModelCatalogClient", () => {
     await expect(client.list({ category: "video" })).resolves.toMatchObject({
       hasMore: false,
       items: [
-        { slug: "acme/movie", categories: ["video"] },
-        { slug: "acme/animate", categories: ["video"] },
-        { slug: "acme/restyle", categories: ["video"] },
+        { slug: "acme/movie", categories: ["video"], taskType: "text-to-video" },
+        { slug: "acme/animate", categories: ["video"], taskType: "image-to-video" },
+        { slug: "acme/restyle", categories: ["video"], taskType: "video-to-video" },
       ],
     });
   });

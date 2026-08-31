@@ -5,24 +5,26 @@ export const DOCUMENTATION_FILES = Object.freeze([
   'README.md',
   'README.zh-CN.md',
   'docs/en-US/LOCAL_USAGE.md',
+  'docs/en-US/RELEASE_CHECKLIST.md',
   'docs/en-US/USER_GUIDE.md',
   'docs/zh-CN/LOCAL_USAGE.md',
+  'docs/zh-CN/RELEASE_CHECKLIST.md',
   'docs/zh-CN/USER_GUIDE.md',
 ])
 
 export const SCREENSHOT_FILES = Object.freeze([
-  'docs/assets/design-desktop-en.webp',
-  'docs/assets/design-desktop-zh.webp',
-  'docs/assets/design-proposal-en.webp',
-  'docs/assets/design-proposal-zh.webp',
-  'docs/assets/design-results-media-en.webp',
-  'docs/assets/design-results-media-zh.webp',
+  'docs/assets/chat-media-generation-en.webp',
+  'docs/assets/chat-media-generation-zh.webp',
+  'docs/assets/design-results-drawer-en.webp',
+  'docs/assets/design-results-drawer-zh.webp',
   'docs/assets/llm-model-selector-en.webp',
   'docs/assets/llm-model-selector-zh.webp',
+  'docs/assets/media-players-en.webp',
+  'docs/assets/media-players-zh.webp',
   'docs/assets/settings-ready-en.webp',
   'docs/assets/settings-ready-zh.webp',
-  'docs/assets/web-tools-en.webp',
-  'docs/assets/web-tools-zh.webp',
+  'docs/assets/web-tools-auto-en.webp',
+  'docs/assets/web-tools-auto-zh.webp',
 ])
 
 const ENGLISH_SCREENSHOTS = Object.freeze(SCREENSHOT_FILES.filter(path => path.endsWith('-en.webp')))
@@ -33,8 +35,8 @@ const CHINESE_SCREENSHOTS = Object.freeze(SCREENSHOT_FILES.filter(path => path.e
  * guides are the durable home for the complete screenshot set.
  */
 export const DOCUMENTATION_SCREENSHOT_RULES = Object.freeze({
-  'README.md': Object.freeze(['docs/assets/design-desktop-en.webp']),
-  'README.zh-CN.md': Object.freeze(['docs/assets/design-desktop-zh.webp']),
+  'README.md': Object.freeze(['docs/assets/chat-media-generation-en.webp']),
+  'README.zh-CN.md': Object.freeze(['docs/assets/chat-media-generation-zh.webp']),
   'docs/en-US/USER_GUIDE.md': ENGLISH_SCREENSHOTS,
   'docs/zh-CN/USER_GUIDE.md': CHINESE_SCREENSHOTS,
 })

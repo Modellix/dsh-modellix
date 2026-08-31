@@ -135,7 +135,7 @@ export class PredictionClient {
       });
       throw new DesignError(
         "SUBMIT_UNKNOWN",
-        "The paid request outcome is unknown; do not retry automatically",
+        "The generation request outcome is unknown; do not retry automatically",
         { cause },
       );
     }
@@ -144,7 +144,7 @@ export class PredictionClient {
       void response.body?.cancel().catch(() => undefined);
       throw new DesignError(
         "SUBMIT_UNKNOWN",
-        "The paid request outcome is unknown; do not retry automatically",
+        "The generation request outcome is unknown; do not retry automatically",
         { status: response.status },
       );
     }
@@ -162,8 +162,8 @@ export class PredictionClient {
       throw new DesignError(
         ambiguous ? "SUBMIT_UNKNOWN" : "SUBMIT_REJECTED",
         ambiguous
-          ? "The paid request outcome is unknown; do not retry automatically"
-          : `The paid request was rejected with HTTP ${response.status}`,
+          ? "The generation request outcome is unknown; do not retry automatically"
+          : `The generation request was rejected with HTTP ${response.status}`,
         { status: response.status },
       );
     }
@@ -178,7 +178,7 @@ export class PredictionClient {
     } catch (cause) {
       throw new DesignError(
         "SUBMIT_UNKNOWN",
-        "The paid request succeeded but its task identifier could not be read",
+        "The generation request succeeded but its task identifier could not be read",
         { cause },
       );
     }
@@ -188,14 +188,14 @@ export class PredictionClient {
     } catch (cause) {
       throw new DesignError(
         "SUBMIT_UNKNOWN",
-        "The paid request succeeded but its task response was invalid",
+        "The generation request succeeded but its task response was invalid",
         { cause },
       );
     }
     if (task === null) {
       throw new DesignError(
         "SUBMIT_UNKNOWN",
-        "The paid request response did not contain a valid task identifier",
+        "The generation request response did not contain a valid task identifier",
       );
     }
     this.#log({

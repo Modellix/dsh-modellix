@@ -90,6 +90,8 @@ export interface DesignModelWire {
   readonly id: string;
   readonly label: string;
   readonly kind: "image" | "video" | "audio" | "unknown";
+  readonly taskType?: string;
+  readonly description?: string;
   readonly featured: boolean;
   readonly available: boolean;
   readonly unavailableReason: DesignModelUnavailableCode | null;
@@ -492,6 +494,12 @@ function parseModel(value: unknown): DesignModelWire {
       ["image", "video", "audio", "unknown"] as const,
       "model.kind",
     ),
+    ...(model.taskType === undefined
+      ? {}
+      : { taskType: readable(model.taskType, "model.taskType", 64) }),
+    ...(model.description === undefined
+      ? {}
+      : { description: readable(model.description, "model.description", MAX_SHORT_TEXT) }),
     featured: boolean(model.featured, "model.featured"),
     available: boolean(model.available, "model.available"),
     unavailableReason:

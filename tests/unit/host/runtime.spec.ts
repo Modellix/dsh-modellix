@@ -15,6 +15,10 @@ import {
   MODELLIX_LLM_PROVENANCE_FIELD,
   planLlmRouteMaterialization,
 } from "../../../src/llm/index.js";
+import {
+  MODELLIX_WEB_FETCH_ENDPOINT,
+  MODELLIX_WEB_SEARCH_ENDPOINT,
+} from "../../../src/web/index.js";
 import { ModellixRuntime, type ModellixRuntimeState } from "../../../src/host/runtime.js";
 
 vi.mock("@deepseek-ai/dsh-anonymous-user-id", () => ({
@@ -33,6 +37,102 @@ afterEach(() => {
 });
 
 describe("ModellixRuntime Host contracts", () => {
+  it("injects automatic Web and media routing only for usable enabled services", async () => {
+    const ready = new RuntimeHarness({
+      config: configWith({ llm: false, credentialEpoch: 1 }),
+      credential: "configured-unit-test-key",
+    });
+    const request = installFetch(async (input) => {
+      if (String(input).startsWith(DESIGN_CATALOG_URL)) {
+        return jsonResponse({
+          data: {
+            items: [{
+              slug: "openai/gpt-image-2",
+              display_name: "GPT Image 2",
+              type: "text-to-image",
+              description: "Create a new image from text.",
+            }],
+            page: 1,
+            page_size: 100,
+            total: 1,
+          },
+        });
+      }
+      if (String(input) === MODELLIX_WEB_SEARCH_ENDPOINT) {
+        return jsonResponse({
+          query: "latest Modellix docs",
+          depth: "standard",
+          answer: "Current documentation found.",
+          results: [{
+            title: "Modellix docs",
+            url: "https://www.modellix.ai/docs",
+            content: "Current documentation.",
+            summary: "Current documentation.",
+            score: 0.9,
+            published_at: null,
+            favicon: null,
+          }],
+          warnings: [],
+          billing: { sku: "web-search.standard", amount_usd: 0.001 },
+          request_id: "request-search-runtime",
+        });
+      }
+      if (String(input) === MODELLIX_WEB_FETCH_ENDPOINT) {
+        return jsonResponse({
+          results: [{
+            url: "https://www.modellix.ai/docs",
+            title: "Modellix docs",
+            content: "Fetched documentation.",
+          }],
+          failed_results: [],
+          billing: { sku: "web-fetch", success_count: 1, amount_usd: 0.001 },
+          request_id: "request-fetch-runtime",
+        });
+      }
+      return rejectUnexpectedFetch(input);
+    });
+    await ModellixRuntime.create(ready.context);
+
+    const injected = ready.startAgentSession();
+    expect(injected).toHaveLength(1);
+    expect(JSON.stringify(injected)).toContain("modellix_web_search");
+    expect(JSON.stringify(injected)).toContain("modellix_web_fetch");
+    expect(JSON.stringify(injected)).toContain("modellix_media_list");
+    expect(JSON.stringify(injected)).not.toContain("configured-unit-test-key");
+    await expect(ready.executeTool("modellix_media_list", { limit: 1 }))
+      .resolves.toMatchObject({
+        service: "media",
+        operation: "list",
+        models: [{ modelId: "openai/gpt-image-2", taskType: "text-to-image" }],
+      });
+    await expect(ready.executeTool("modellix_web_search", {
+      query: "latest Modellix docs",
+    })).resolves.toMatchObject({
+      provider: "modellix",
+      operation: "search",
+      endpoint: MODELLIX_WEB_SEARCH_ENDPOINT,
+      sources: [{ url: "https://www.modellix.ai/docs" }],
+    });
+    await expect(ready.executeTool("modellix_web_fetch", {
+      url: "https://www.modellix.ai/docs",
+    })).resolves.toMatchObject({
+      provider: "modellix",
+      operation: "fetch",
+      endpoint: MODELLIX_WEB_FETCH_ENDPOINT,
+      body: { content: "Fetched documentation." },
+    });
+    expect(request.mock.calls.filter(([input]) =>
+      String(input) === MODELLIX_WEB_SEARCH_ENDPOINT)).toHaveLength(1);
+    expect(request.mock.calls.filter(([input]) =>
+      String(input) === MODELLIX_WEB_FETCH_ENDPOINT)).toHaveLength(1);
+    await ready.dispose();
+
+    const missing = new RuntimeHarness({ config: configWith({ llm: false }) });
+    await ModellixRuntime.create(missing.context);
+    expect(missing.startAgentSession()).toEqual([]);
+    await missing.dispose();
+  });
+
   it("initializes without a Secret and exposes only write-safe Credential metadata", async () => {
     const harness = new RuntimeHarness({ config: configWith({ llm: false }) });
     installFetch(rejectUnexpectedFetch);
@@ -886,7 +986,17 @@ type RpcHandler = (
 ) => Promise<RpcResultLike>;
 
 type CredentialListener = (ref: string) => unknown;
+type AgentSessionStartListener = (payload: {
+  readonly agent: { inject(message: unknown): void };
+}) => unknown;
 type Cleanup = () => void | Promise<void>;
+type RuntimeTool = {
+  readonly name: string;
+  execute(
+    args: Record<string, unknown>,
+    context: { readonly signal: AbortSignal; readonly agent: { readonly id: string } },
+  ): Promise<unknown>;
+};
 
 class RuntimeHarness {
   readonly settings: FakeSettings;
@@ -894,8 +1004,10 @@ class RuntimeHarness {
   readonly llm: FakeLlmRegistry;
   readonly loggerErrors: unknown[][] = [];
   readonly loggerWarnings: unknown[][] = [];
+  readonly registeredTools: RuntimeTool[] = [];
   readonly #designValues: Record<string, string> = {};
   #credentialListeners = new Set<CredentialListener>();
+  #agentSessionStartListeners = new Set<AgentSessionStartListener>();
   #toolPreExecuteListeners = new Set<(...args: unknown[]) => unknown>();
   #cleanups: Cleanup[] = [];
   #rpcHandler: RpcHandler | undefined;
@@ -932,12 +1044,29 @@ class RuntimeHarness {
     return this.rpcValue("state/get", { version: 1 });
   }
 
+  startAgentSession(): readonly unknown[] {
+    const injected: unknown[] = [];
+    const payload = { agent: { inject: (message: unknown) => injected.push(message) } };
+    for (const listener of this.#agentSessionStartListeners) listener(payload);
+    return injected;
+  }
+
+  executeTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    const tool = this.registeredTools.find((candidate) => candidate.name === name);
+    if (tool === undefined) throw new Error(`Tool is not registered: ${name}`);
+    return tool.execute(args, {
+      signal: new AbortController().signal,
+      agent: { id: "runtime-tool-session" },
+    });
+  }
+
   async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
     const cleanups = this.#cleanups.splice(0);
     await Promise.allSettled(cleanups.map(async (cleanup) => cleanup()));
     this.#credentialListeners.clear();
+    this.#agentSessionStartListeners.clear();
     this.#toolPreExecuteListeners.clear();
     this.#rpcHandler = undefined;
   }
@@ -946,6 +1075,7 @@ class RuntimeHarness {
     await this.dispose();
     this.#disposed = false;
     this.#credentialListeners = new Set();
+    this.#agentSessionStartListeners = new Set();
     this.#toolPreExecuteListeners = new Set();
     this.#cleanups = [];
     this.#rpcHandler = undefined;
@@ -976,7 +1106,13 @@ class RuntimeHarness {
         registerFetchProvider: () => () => undefined,
       },
       tools: {
-        register: () => () => undefined,
+        register: (tool: RuntimeTool) => {
+          this.registeredTools.push(tool);
+          return () => {
+            const index = this.registeredTools.indexOf(tool);
+            if (index >= 0) this.registeredTools.splice(index, 1);
+          };
+        },
       },
       connection: {
         rpc: {
@@ -1038,6 +1174,15 @@ class RuntimeHarness {
           this.#toolPreExecuteListeners.add(toolListener);
           const cleanup = () => {
             this.#toolPreExecuteListeners.delete(toolListener);
+          };
+          this.#cleanups.push(cleanup);
+          return cleanup;
+        }
+        if (event === "agent/session-start") {
+          const sessionListener = listener as unknown as AgentSessionStartListener;
+          this.#agentSessionStartListeners.add(sessionListener);
+          const cleanup = () => {
+            this.#agentSessionStartListeners.delete(sessionListener);
           };
           this.#cleanups.push(cleanup);
           return cleanup;

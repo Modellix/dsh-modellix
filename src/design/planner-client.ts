@@ -548,7 +548,7 @@ function statusError(status: number): DesignError {
     case 402:
       return plannerError(
         "PLANNER_BILLING_BLOCKED",
-        "Design planner billing is unavailable",
+        "The Design planner request is unavailable for the current account",
         status,
       );
     case 403:
@@ -585,7 +585,7 @@ function statusError(status: number): DesignError {
 function submitUnknown(status?: number): DesignError {
   return plannerError(
     "SUBMIT_UNKNOWN",
-    "The paid Design planner outcome is unknown; do not retry automatically",
+    "The Design planner outcome is unknown; do not retry automatically",
     status,
   );
 }

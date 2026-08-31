@@ -84,6 +84,7 @@ interface DesignProposalInput {
 }
 
 interface DesignSessionState {
+  readonly sessionId: string;
   selectedModelId: string | null;
   draft: DesignDraftState | null;
   proposal: DesignProposalState | null;
@@ -97,6 +98,8 @@ interface DesignModelWire {
   readonly id: string;
   readonly label: string;
   readonly kind: "image" | "video" | "audio" | "unknown";
+  readonly taskType?: string;
+  readonly description?: string;
   readonly featured: boolean;
   readonly available: boolean;
   readonly unavailableReason: DesignModelUnavailableCode | null;
@@ -494,6 +497,7 @@ export class DesignHostController {
     await this.#repository.recordSubmitIntent(
       requestId,
       input.modelId,
+      input.sessionId,
       credential.credentialEpoch,
     );
 
@@ -562,7 +566,7 @@ export class DesignHostController {
         }
         throw new DesignError(
           "SUBMIT_UNKNOWN",
-          "The paid request succeeded but its task could not be persisted",
+          "The generation request succeeded but its task could not be persisted",
           { cause: firstPersistenceError },
         );
       }
@@ -649,6 +653,8 @@ export class DesignHostController {
         id: model.slug,
         label: model.displayName,
         kind: model.categories[0] ?? "unknown",
+        ...(model.taskType === undefined ? {} : { taskType: model.taskType }),
+        ...(model.description === undefined ? {} : { description: model.description }),
         featured: featuredSlugs.has(model.slug),
         available: true,
         unavailableReason: null,
@@ -667,6 +673,7 @@ export class DesignHostController {
     const credentialReady = credential !== undefined;
     const models = ensureSelectedModel(currentModels, session.selectedModelId);
     const tasks = [...await this.#repository.listTasks()]
+      .filter((task) => task.sessionId === session.sessionId)
       .sort((left, right) => right.updatedAt - left.updatedAt);
     return {
       version: 1,
@@ -694,6 +701,7 @@ export class DesignHostController {
       if (oldest !== undefined) this.#sessions.delete(oldest[0]);
     }
     const created: DesignSessionState = {
+      sessionId,
       selectedModelId: null,
       draft: null,
       proposal: null,

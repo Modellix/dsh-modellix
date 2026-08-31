@@ -5,6 +5,7 @@ import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import type { RpcResult } from "@deepseek-ai/dsh-host-apiproxy/api";
 import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
 import type {} from "@deepseek-ai/dsh-client-connection";
+import type {} from "@deepseek-ai/dsh-agent";
 import type {} from "@deepseek-ai/dsh-credentials";
 import type {} from "@deepseek-ai/dsh-llm";
 import type {} from "@deepseek-ai/dsh-settings";
@@ -47,15 +48,20 @@ import {
   type LlmMaterializationReceipt,
   type LlmRouteLedger,
 } from "../llm/index.js";
-import { registerModellixWebProviders } from "../web/index.js";
+import {
+  createModellixWebProviders,
+  registerModellixWebProviderInstances,
+} from "../web/index.js";
 import {
   CredentialBroker,
   CredentialValidationError,
   type HarnessCredentialPort,
 } from "./credential-broker.js";
 import { DesignHostController } from "./design-controller.js";
+import { createModellixRoutingMessage } from "./agent-routing-context.js";
 import { openDesignStorage, type ModellixDesignDomain } from "./design-storage.js";
 import { registerModellixDesignTools } from "./design-tool.js";
+import { registerModellixWebTools } from "./web-tool.js";
 import {
   PluginSettingsController,
   type SettingsServiceLike,
@@ -279,21 +285,45 @@ export class ModellixRuntime {
       });
     });
 
-    this.#ctx.effect(() => registerModellixWebProviders(this.#ctx.web, {
-      isEnabled: () => this.#config.services.web.enabled,
-      hasCredential: () => this.credentialIsUsable(),
-      resolveCredential: async () => {
-        const hit = await this.resolveUsableCredential();
-        if (hit === undefined) this.requestCredentialRecovery();
-        return hit === undefined ? null : { apiKey: hit.value, credentialEpoch: hit.credentialEpoch };
-      },
-      getUserId: () => this.#userId,
-      isCredentialEpochCurrent: (epoch) => epoch === this.#config.credentialEpoch,
-      onCredentialRejected: async (epoch) => {
-        if (epoch !== this.#config.credentialEpoch) return;
-        this.markCredentialRejected(epoch);
-      },
-    }), "dsh-modellix: native Web providers");
+    this.#ctx.effect(() => {
+      const providers = createModellixWebProviders({
+        isEnabled: () => this.#config.services.web.enabled,
+        hasCredential: () => this.credentialIsUsable(),
+        resolveCredential: async () => {
+          const hit = await this.resolveUsableCredential();
+          if (hit === undefined) this.requestCredentialRecovery();
+          return hit === undefined ? null : { apiKey: hit.value, credentialEpoch: hit.credentialEpoch };
+        },
+        getUserId: () => this.#userId,
+        isCredentialEpochCurrent: (epoch) => epoch === this.#config.credentialEpoch,
+        onCredentialRejected: async (epoch) => {
+          if (epoch !== this.#config.credentialEpoch) return;
+          this.markCredentialRejected(epoch);
+        },
+      });
+      const disposeProviders = registerModellixWebProviderInstances(
+        this.#ctx.web,
+        providers,
+      );
+      try {
+        const disposeTools = registerModellixWebTools(this.#ctx, providers);
+        return () => {
+          disposeTools();
+          disposeProviders();
+        };
+      } catch (error) {
+        disposeProviders();
+        throw error;
+      }
+    }, "dsh-modellix: Web providers and explicit Modellix tools");
+
+    this.#ctx.on("agent/session-start", ({ agent }) => {
+      const message = createModellixRoutingMessage({
+        mediaEnabled: this.#config.services.design.enabled && this.credentialIsUsable(),
+        webEnabled: this.#config.services.web.enabled && this.credentialIsUsable(),
+      });
+      if (message !== null) agent.inject(message);
+    });
 
     this.#ctx.effect(() => this.#ctx.connection.rpc.handle(
       RPC_CHANNEL,
@@ -1130,6 +1160,7 @@ export class ModellixRuntime {
   private syncDesignTools(enabled: boolean): void {
     if (enabled && this.#disposeDesignTools === undefined) {
       this.#disposeDesignTools = registerModellixDesignTools(this.#ctx, {
+        resolveCredential: async () => (await this.resolveUsableCredential())?.value,
         handle: (endpoint, payload, signal) => {
           const operationSignal = signal === undefined
             ? this.#lifecycleAbort.signal

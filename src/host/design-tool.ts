@@ -4,20 +4,26 @@ import type { Context } from "@deepseek-ai/cordis";
 import {
   defineTool,
   type JsonValue as ToolJsonValue,
-  type PreToolDecision,
   type ToolDefinition,
   type ToolRunContext,
 } from "@deepseek-ai/dsh-tools";
 
 import { DesignError, type JsonValue as DesignJsonValue } from "../design/index.js";
+import {
+  MediaUploadClient,
+  prepareMediaUploadFromPath,
+  prepareMediaUploadFromSession,
+} from "../design/media-upload-client.js";
 import { DESIGN_JSON_LIMITS } from "../shared/design-wire-limits.js";
 import { inspectJsonBudget } from "../shared/json-budget.js";
 import type { DesignSnapshotWire } from "./design-controller.js";
 
-export const MODELLIX_DESIGN_MODELS_TOOL = "modellix_design_models";
-export const MODELLIX_DESIGN_PREPARE_TOOL = "modellix_design_prepare";
-export const MODELLIX_DESIGN_GENERATE_TOOL = "modellix_design_generate";
-export const MODELLIX_DESIGN_TASK_TOOL = "modellix_design_task";
+export const MODELLIX_MEDIA_LIST_TOOL = "modellix_media_list";
+export const MODELLIX_MEDIA_SCHEMA_TOOL = "modellix_media_schema";
+export const MODELLIX_MEDIA_PREPARE_TOOL = "modellix_media_prepare";
+export const MODELLIX_MEDIA_UPLOAD_FILE_TOOL = "modellix_media_upload_file";
+export const MODELLIX_MEDIA_GENERATE_TOOL = "modellix_media_generate";
+export const MODELLIX_MEDIA_GET_RESULT_TOOL = "modellix_media_get_result";
 
 const MODEL_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -38,22 +44,33 @@ export interface DesignToolController {
     payload: unknown,
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire>;
+  resolveCredential?(): Promise<string | undefined>;
 }
 
-interface ModellixDesignModelResult {
+interface ModellixMediaListResult {
   readonly version: 1;
-  readonly service: "design";
-  readonly operation: "models";
+  readonly service: "media";
+  readonly operation: "list";
   readonly models: {
     readonly modelId: string;
     readonly label: string;
     readonly kind: "image" | "video" | "audio" | "unknown";
+    readonly taskType?: string;
+    readonly description?: string;
     readonly featured: boolean;
     readonly available: boolean;
     readonly unavailableReason?: string;
   }[];
   readonly truncated: boolean;
-  readonly selectedModelId?: string;
+}
+
+interface ModellixMediaSchemaResult {
+  readonly version: 1;
+  readonly service: "media";
+  readonly operation: "schema";
+  readonly modelId: string;
+  readonly available: boolean;
+  readonly unavailableReason?: string;
   readonly schema?: {
     readonly modelId: string;
     readonly irContractHash: string;
@@ -70,9 +87,9 @@ interface ModellixDesignModelResult {
   };
 }
 
-interface ModellixDesignPrepareResult {
+interface ModellixMediaPrepareResult {
   readonly version: 1;
-  readonly service: "design";
+  readonly service: "media";
   readonly operation: "prepare";
   readonly modelId: string;
   readonly irContractHash: string;
@@ -89,9 +106,22 @@ interface ModellixDesignPrepareResult {
   readonly requiresConfirmation: true;
 }
 
-interface ModellixDesignGenerateResult {
+interface ModellixMediaUploadResult {
   readonly version: 1;
-  readonly service: "design";
+  readonly service: "media";
+  readonly operation: "upload_file";
+  readonly fileId: string;
+  readonly type: string;
+  readonly url: string;
+  readonly filename: string;
+  readonly size: number;
+  readonly createdAt?: string;
+  readonly noAutomaticRetry: true;
+}
+
+interface ModellixMediaGenerateResult {
+  readonly version: 1;
+  readonly service: "media";
   readonly operation: "generate";
   readonly modelId: string;
   readonly submitted: true;
@@ -109,10 +139,10 @@ interface ModellixDesignGenerateResult {
   };
 }
 
-interface ModellixDesignTaskResult {
+interface ModellixMediaGetResultResult {
   readonly version: 1;
-  readonly service: "design";
-  readonly operation: "task";
+  readonly service: "media";
+  readonly operation: "get_result";
   readonly found: boolean;
   readonly job?: {
     readonly jobId: string;
@@ -133,23 +163,26 @@ interface ModellixDesignTaskResult {
 }
 
 /**
- * Build the four stable, namespaced Modellix Design tools. The caller owns
+ * Build the six stable, namespaced Modellix media tools. The caller owns
  * visibility and must only register these definitions while Design is enabled.
  */
 export function createModellixDesignToolDefinitions(
   controller: DesignToolController,
+  uploadClient?: MediaUploadClient,
 ): readonly ToolDefinition[] {
+  const uploads = uploadClient ?? new MediaUploadClient();
   return [
-    createModelsTool(controller),
+    createListTool(controller),
+    createSchemaTool(controller),
     createPrepareTool(controller),
+    createUploadFileTool(uploads, controller.resolveCredential),
     createGenerateTool(controller),
-    createTaskTool(controller),
+    createGetResultTool(controller),
   ];
 }
 
 /**
- * Register Design tools plus explicit LLM-proposal and paid-generate approval gates. The returned
- * disposer removes both definitions and the gate, allowing the runtime to
+ * Register media tools. The returned disposer removes every definition, allowing the runtime to
  * mirror the live Design toggle without leaving model-visible stale tools.
  */
 export function registerModellixDesignTools(
@@ -158,20 +191,6 @@ export function registerModellixDesignTools(
 ): () => void {
   const disposers: (() => unknown)[] = [];
   try {
-    disposers.push(ctx.on("tools/pre-execute", async (exec, next): Promise<PreToolDecision> => {
-      if (
-        exec.name !== MODELLIX_DESIGN_PREPARE_TOOL &&
-        exec.name !== MODELLIX_DESIGN_GENERATE_TOOL
-      ) return next();
-      const downstream = await next();
-      if (downstream.kind !== "allow") return downstream;
-      return {
-        kind: "ask",
-        reason: exec.name === MODELLIX_DESIGN_PREPARE_TOOL
-          ? "This sends one Modellix LLM request to prepare a parameter proposal and may consume balance. Review the instruction and allow it once to continue. It will not generate media."
-          : "This submits one paid Modellix Design generation request. Review the arguments and allow it once to confirm.",
-      };
-    }));
     for (const definition of createModellixDesignToolDefinitions(controller)) {
       disposers.push(ctx.tools.register(definition));
     }
@@ -182,13 +201,12 @@ export function registerModellixDesignTools(
   return () => disposeAll(disposers);
 }
 
-function createModelsTool(controller: DesignToolController): ToolDefinition {
+function createListTool(controller: DesignToolController): ToolDefinition {
   return defineTool({
-    name: MODELLIX_DESIGN_MODELS_TOOL,
-    description: "Search the live Modellix Design model catalog. Optionally select one model to inspect its compact, schema-derived field summary. This read-only tool never accepts credentials.",
+    name: MODELLIX_MEDIA_LIST_TOOL,
+    description: "List and search the live Modellix media model catalog. Use this before generation when no compatible provider/model slug is already known. This read-only tool never accepts credentials.",
     parameters: {
       query: { type: "string", description: "Optional case-insensitive model, provider, or media-kind search." },
-      model: { type: "string", description: "Optional exact provider/model slug whose current schema should be summarized." },
       limit: { type: "integer", description: `Maximum models to return (default ${String(DEFAULT_MODEL_LIMIT)}, maximum ${String(MAX_MODEL_LIMIT)}).` },
     },
     output: {
@@ -197,8 +215,8 @@ function createModelsTool(controller: DesignToolController): ToolDefinition {
         additionalProperties: false,
         properties: {
           version: { type: "integer", const: 1, required: true },
-          service: { type: "string", const: "design", required: true },
-          operation: { type: "string", const: "models", required: true },
+          service: { type: "string", const: "media", required: true },
+          operation: { type: "string", const: "list", required: true },
           models: {
             type: "array",
             required: true,
@@ -209,6 +227,8 @@ function createModelsTool(controller: DesignToolController): ToolDefinition {
                 modelId: { type: "string", required: true },
                 label: { type: "string", required: true },
                 kind: { type: "string", enum: ["image", "video", "audio", "unknown"], required: true },
+                taskType: { type: "string" },
+                description: { type: "string" },
                 featured: { type: "boolean", required: true },
                 available: { type: "boolean", required: true },
                 unavailableReason: { type: "string" },
@@ -216,7 +236,53 @@ function createModelsTool(controller: DesignToolController): ToolDefinition {
             },
           },
           truncated: { type: "boolean", required: true },
-          selectedModelId: { type: "string" },
+        },
+      },
+      render: (_args, value) => [{ type: "text", text: formatModels(value) }],
+    },
+    async execute(args, exec) {
+      assertOnlyKeys(args, ["query", "limit"]);
+      throwIfAborted(exec.signal);
+      const sessionId = sessionIdFrom(exec);
+      const query = optionalBoundedText(args.query, "query", MAX_QUERY_LENGTH)?.toLowerCase() ?? "";
+      const limit = boundedLimit(args.limit);
+      const snapshot = await controller.handle(
+        "design/read",
+        { version: 1, sessionId },
+        exec.signal,
+      );
+      requireReady(snapshot);
+
+      throwIfAborted(exec.signal);
+      return projectModels(snapshot, query, limit);
+    },
+    presentCall: (args) => ({
+      card: "generic",
+      title: "Browse Modellix media models",
+      kind: "search",
+      ...(args.query === undefined ? {} : { rawInput: args.query }),
+    }),
+  });
+}
+
+function createSchemaTool(controller: DesignToolController): ToolDefinition {
+  return defineTool({
+    name: MODELLIX_MEDIA_SCHEMA_TOOL,
+    description: "Get the current Modellix API schema for one exact media model. Use the returned field paths and contract hash before prepare or generate; do not guess model parameters.",
+    parameters: {
+      model: { type: "string", required: true, description: "Exact provider/model slug returned by modellix_media_list." },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          version: { type: "integer", const: 1, required: true },
+          service: { type: "string", const: "media", required: true },
+          operation: { type: "string", const: "schema", required: true },
+          modelId: { type: "string", required: true },
+          available: { type: "boolean", required: true },
+          unavailableReason: { type: "string" },
           schema: {
             type: "object",
             additionalProperties: false,
@@ -245,49 +311,103 @@ function createModelsTool(controller: DesignToolController): ToolDefinition {
           },
         },
       },
-      render: (_args, value) => [{ type: "text", text: formatModels(value) }],
+      render: (_args, value) => [{ type: "text", text: formatSchema(value) }],
     },
     async execute(args, exec) {
-      assertOnlyKeys(args, ["query", "model", "limit"]);
-      throwIfAborted(exec.signal);
+      assertOnlyKeys(args, ["model"]);
+      const modelId = requireModel(args.model);
       const sessionId = sessionIdFrom(exec);
-      const query = optionalBoundedText(args.query, "query", MAX_QUERY_LENGTH)?.toLowerCase() ?? "";
-      const limit = boundedLimit(args.limit);
-      const requestedModel = args.model === undefined ? undefined : requireModel(args.model);
-      let snapshot = await controller.handle(
-        "design/read",
-        { version: 1, sessionId },
-        exec.signal,
-      );
-      requireReady(snapshot);
-
-      if (requestedModel !== undefined) {
-        requireCatalogModel(snapshot, requestedModel);
-        throwIfAborted(exec.signal);
-        snapshot = await controller.handle("design/select-model", {
+      const read = await controller.handle("design/read", { version: 1, sessionId }, exec.signal);
+      requireReady(read);
+      requireCatalogModel(read, modelId);
+      throwIfAborted(exec.signal);
+      try {
+        const selected = await controller.handle("design/select-model", {
           version: 1,
           sessionId,
-          modelId: requestedModel,
+          modelId,
         }, exec.signal);
+        return projectSchema(requireDraft(selected, modelId));
+      } catch (error) {
+        if (!isUnsupportedSchema(error)) throw error;
+        return projectUnsupportedSchema(modelId);
       }
-      throwIfAborted(exec.signal);
-      return projectModels(snapshot, query, limit, requestedModel);
     },
-    presentCall: (args) => ({
-      card: "generic",
-      title: args.model === undefined ? "Browse Modellix Design models" : `Inspect ${args.model}`,
-      kind: "search",
-      ...(args.query === undefined ? {} : { rawInput: args.query }),
-    }),
+    presentCall: (args) => ({ card: "generic", title: `Inspect ${args.model} schema`, kind: "read" }),
+  });
+}
+
+function createUploadFileTool(
+  client: MediaUploadClient,
+  resolveCredential: DesignToolController["resolveCredential"],
+): ToolDefinition {
+  return defineTool({
+    name: MODELLIX_MEDIA_UPLOAD_FILE_TOOL,
+    description: "Upload one image from the current conversation or session workspace to Modellix and return a temporary URL for media model inputs. Supply exactly one of attachment_id or path. Reuse returned URLs and never retry an unknown upload outcome automatically.",
+    parameters: {
+      attachment_id: { type: "string", description: "Attachment ID from an image in this conversation." },
+      path: { type: "string", description: "Image path inside the current session workspace." },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          version: { type: "integer", const: 1, required: true },
+          service: { type: "string", const: "media", required: true },
+          operation: { type: "string", const: "upload_file", required: true },
+          fileId: { type: "string", required: true },
+          type: { type: "string", required: true },
+          url: { type: "string", required: true },
+          filename: { type: "string", required: true },
+          size: { type: "integer", required: true },
+          createdAt: { type: "string" },
+          noAutomaticRetry: { type: "boolean", const: true, required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: "text",
+        text: `Uploaded ${value.filename} for Modellix media input: ${value.url}\nReuse this URL; do not upload the same file again unless the URL is no longer usable.`,
+      }],
+    },
+    async execute(args, exec) {
+      assertOnlyKeys(args, ["attachment_id", "path"]);
+      const attachmentId = optionalBoundedText(args.attachment_id, "attachment_id", 512);
+      const path = optionalBoundedText(args.path, "path", 32_767);
+      if ((attachmentId === undefined) === (path === undefined)) {
+        throw new DesignError("INVALID_ARGUMENT", "Provide exactly one of attachment_id or path");
+      }
+      const prepared = attachmentId === undefined
+        ? await prepareMediaUploadFromPath(exec.agent?.session.header.cwd, path as string)
+        : await prepareMediaUploadFromSession(exec.agent, attachmentId, exec.signal);
+      throwIfAborted(exec.signal);
+      const apiKey = await resolveCredential?.();
+      if (apiKey === undefined) throw new DesignError("MISSING_API_KEY", "A Modellix API key is required");
+      const uploaded = await client.upload({ ...prepared, apiKey, signal: exec.signal });
+      const result: ModellixMediaUploadResult = {
+        version: 1,
+        service: "media",
+        operation: "upload_file",
+        fileId: uploaded.fileId,
+        type: uploaded.type,
+        url: uploaded.url,
+        filename: uploaded.filename,
+        size: uploaded.size,
+        ...(uploaded.createdAt === null ? {} : { createdAt: uploaded.createdAt }),
+        noAutomaticRetry: true,
+      };
+      return result;
+    },
+    presentCall: () => ({ card: "generic", title: "Upload media to Modellix", kind: "execute" }),
   });
 }
 
 function createPrepareTool(controller: DesignToolController): ToolDefinition {
   return defineTool({
-    name: MODELLIX_DESIGN_PREPARE_TOOL,
-    description: "Use one Modellix LLM request to prepare a schema-constrained Design parameter proposal for one provider/model slug. This may consume balance but never submits a media generation. The returned diff still requires explicit acceptance or a separately approved generate call.",
+    name: MODELLIX_MEDIA_PREPARE_TOOL,
+    description: "Convert a natural-language media request into a schema-constrained parameter proposal for one exact provider/model slug. Use this for Modellix Design parameter editing; it never submits media generation.",
     parameters: {
-      model: { type: "string", required: true, description: "Exact provider/model slug from modellix_design_models." },
+      model: { type: "string", required: true, description: "Exact provider/model slug from modellix_media_list." },
       instruction: { type: "string", required: true, description: "Prompt or conservative parameter instruction. Plain text updates only the schema-declared primary input; other fields require explicit assignments." },
     },
     output: {
@@ -296,7 +416,7 @@ function createPrepareTool(controller: DesignToolController): ToolDefinition {
         additionalProperties: false,
         properties: {
           version: { type: "integer", const: 1, required: true },
-          service: { type: "string", const: "design", required: true },
+          service: { type: "string", const: "media", required: true },
           operation: { type: "string", const: "prepare", required: true },
           modelId: { type: "string", required: true },
           irContractHash: { type: "string", required: true },
@@ -356,9 +476,9 @@ function createPrepareTool(controller: DesignToolController): ToolDefinition {
       throwIfAborted(exec.signal);
       const proposal = proposed.proposal;
       if (proposal === null) throw new DesignError("UNEXPECTED_RESPONSE", "Design did not return a parameter proposal");
-      const result: ModellixDesignPrepareResult = {
+      const result: ModellixMediaPrepareResult = {
         version: 1,
-        service: "design",
+        service: "media",
         operation: "prepare",
         modelId,
         irContractHash: draft.irContractHash,
@@ -382,8 +502,8 @@ function createPrepareTool(controller: DesignToolController): ToolDefinition {
 
 function createGenerateTool(controller: DesignToolController): ToolDefinition {
   return defineTool({
-    name: MODELLIX_DESIGN_GENERATE_TOOL,
-    description: "Submit exactly one paid Modellix Design generation after the Harness asks the user to allow it once. Use an exact provider/model slug and schema field names or RFC 6901 paths from modellix_design_models. Never include an API key. Unknown outcomes must not be retried automatically.",
+    name: MODELLIX_MEDIA_GENERATE_TOOL,
+    description: "Generate or edit image, video, or audio with one exact Modellix media model. Choose text-to-media for a new work; reuse the latest relevant media URL or uploaded file for edit/image-to-video/video-to-video requests. Use schema fields from modellix_media_schema. Never include an API key, never retry an unknown submission outcome, and never start a replacement or parallel generation while a matching task is queued or running unless the user explicitly asks for another result.",
     parameters: {
       model: { type: "string", required: true, description: "Exact provider/model slug from the live Design catalog." },
       prompt: { type: "string", description: "Primary prompt/text. It is mapped to the model schema's declared primary input field." },
@@ -399,7 +519,7 @@ function createGenerateTool(controller: DesignToolController): ToolDefinition {
         additionalProperties: false,
         properties: {
           version: { type: "integer", const: 1, required: true },
-          service: { type: "string", const: "design", required: true },
+          service: { type: "string", const: "media", required: true },
           operation: { type: "string", const: "generate", required: true },
           modelId: { type: "string", required: true },
           submitted: { type: "boolean", const: true, required: true },
@@ -430,6 +550,7 @@ function createGenerateTool(controller: DesignToolController): ToolDefinition {
         },
       },
       render: (_args, value) => [{ type: "text", text: formatGeneration(value) }],
+      presentationMeta: (_args, value) => value,
     },
     async execute(args, exec) {
       assertOnlyKeys(args, ["model", "prompt", "input"]);
@@ -467,10 +588,10 @@ function createGenerateTool(controller: DesignToolController): ToolDefinition {
         if (!(error instanceof DesignError) || error.code !== "SUBMIT_UNKNOWN") throw error;
         // The controller has already persisted the non-replayable WAL state.
         // Return a successful canonical warning so the model is not invited to
-        // treat an ambiguous paid POST like an ordinary retryable tool error.
-        const result: ModellixDesignGenerateResult = {
+        // treat an ambiguous generation POST like an ordinary retryable tool error.
+        const result: ModellixMediaGenerateResult = {
           version: 1,
-          service: "design",
+          service: "media",
           operation: "generate",
           modelId,
           submitted: true,
@@ -479,7 +600,7 @@ function createGenerateTool(controller: DesignToolController): ToolDefinition {
           resources: [],
           diagnostic: {
             code: "submit-unknown",
-            message: "The paid generation outcome is unknown. Do not retry automatically; inspect Design results or the Modellix console.",
+            message: "The generation outcome is unknown. Do not retry automatically; inspect Modellix Design results or the Modellix console.",
           },
         };
         return result;
@@ -489,10 +610,10 @@ function createGenerateTool(controller: DesignToolController): ToolDefinition {
   });
 }
 
-function createTaskTool(controller: DesignToolController): ToolDefinition {
+function createGetResultTool(controller: DesignToolController): ToolDefinition {
   return defineTool({
-    name: MODELLIX_DESIGN_TASK_TOOL,
-    description: "Refresh and inspect a Design job already present in this plugin's persistent repository. Accepts a remote task ID or local submit-unknown request ID. This read-only tool never submits or retries a generation.",
+    name: MODELLIX_MEDIA_GET_RESULT_TOOL,
+    description: "Refresh and inspect an existing Modellix media generation at most once per Agent turn. For a nonterminal result, the assistant may only confirm submission and direct the user to the live result card or Modellix Design; it must not write queued, running, generating, processing, pending, or equivalent status wording in ordinary assistant text. Accepts a remote task ID or local submit-unknown request ID and never resubmits or replaces generation.",
     parameters: {
       task_id: { type: "string", required: true, description: "Existing remote task ID or local Design request ID." },
     },
@@ -502,8 +623,8 @@ function createTaskTool(controller: DesignToolController): ToolDefinition {
         additionalProperties: false,
         properties: {
           version: { type: "integer", const: 1, required: true },
-          service: { type: "string", const: "design", required: true },
-          operation: { type: "string", const: "task", required: true },
+          service: { type: "string", const: "media", required: true },
+          operation: { type: "string", const: "get_result", required: true },
           found: { type: "boolean", required: true },
           job: {
             type: "object",
@@ -540,6 +661,7 @@ function createTaskTool(controller: DesignToolController): ToolDefinition {
         },
       },
       render: (_args, value) => [{ type: "text", text: formatTask(value) }],
+      presentationMeta: (_args, value) => value,
     },
     async execute(args, exec) {
       assertOnlyKeys(args, ["task_id"]);
@@ -555,9 +677,9 @@ function createTaskTool(controller: DesignToolController): ToolDefinition {
       requireReady(snapshot);
       throwIfAborted(exec.signal);
       const job = snapshot.jobs.find((candidate) => candidate.jobId === taskId);
-      const result: ModellixDesignTaskResult = job === undefined
-        ? { version: 1, service: "design", operation: "task", found: false }
-        : { version: 1, service: "design", operation: "task", found: true, job: projectJob(job) };
+      const result: ModellixMediaGetResultResult = job === undefined
+        ? { version: 1, service: "media", operation: "get_result", found: false }
+        : { version: 1, service: "media", operation: "get_result", found: true, job: projectJob(job) };
       return result;
     },
     presentCall: (args) => ({ card: "generic", title: `Inspect Design task ${args.task_id}`, kind: "read" }),
@@ -568,44 +690,63 @@ function projectModels(
   snapshot: DesignSnapshotWire,
   query: string,
   limit: number,
-  requestedModel: string | undefined,
-): ModellixDesignModelResult {
+): ModellixMediaListResult {
   const matches = snapshot.models.filter((model) =>
-    query === "" || [model.id, model.label, model.kind].some((value) => value.toLowerCase().includes(query)));
+    query === "" || [model.id, model.label, model.kind, model.taskType, model.description]
+      .some((value) => value?.toLowerCase().includes(query) === true));
   const models = matches.slice(0, limit).map((model) => ({
     modelId: model.id,
     label: model.label,
     kind: model.kind,
+    ...(model.taskType === undefined ? {} : { taskType: model.taskType }),
+    ...(model.description === undefined ? {} : { description: model.description }),
     featured: model.featured,
     available: model.available,
     ...(model.unavailableReason === null
       ? {}
       : { unavailableReason: modelUnavailableMessage(model.unavailableReason) }),
   }));
-  const draft = requestedModel === undefined ? undefined : snapshot.draft;
   return {
     version: 1,
-    service: "design",
-    operation: "models",
+    service: "media",
+    operation: "list",
     models,
     truncated: matches.length > models.length,
-    ...(snapshot.selectedModelId === null ? {} : { selectedModelId: snapshot.selectedModelId }),
-    ...(draft === null || draft === undefined ? {} : {
-      schema: {
-        modelId: draft.modelId,
-        irContractHash: draft.irContractHash,
-        primaryInputPath: draft.primaryInputPath,
-        fields: draft.fields.slice(0, MAX_SCHEMA_FIELDS).map((field) => ({
-          path: field.path,
-          label: field.label,
-          kind: field.kind,
-          required: field.required,
-          options: field.options.map((option) => option.value),
-          ...(field.description === null ? {} : { description: field.description }),
-        })),
-        truncated: draft.fields.length > MAX_SCHEMA_FIELDS,
-      },
-    }),
+  };
+}
+
+function projectSchema(draft: DesignDraft): ModellixMediaSchemaResult {
+  return {
+    version: 1,
+    service: "media",
+    operation: "schema",
+    modelId: draft.modelId,
+    available: true,
+    schema: {
+      modelId: draft.modelId,
+      irContractHash: draft.irContractHash,
+      primaryInputPath: draft.primaryInputPath,
+      fields: draft.fields.slice(0, MAX_SCHEMA_FIELDS).map((field) => ({
+        path: field.path,
+        label: field.label,
+        kind: field.kind,
+        required: field.required,
+        options: field.options.map((option) => option.value),
+        ...(field.description === null ? {} : { description: field.description }),
+      })),
+      truncated: draft.fields.length > MAX_SCHEMA_FIELDS,
+    },
+  };
+}
+
+function projectUnsupportedSchema(modelId: string): ModellixMediaSchemaResult {
+  return {
+    version: 1,
+    service: "media",
+    operation: "schema",
+    modelId,
+    available: false,
+    unavailableReason: "This model's API schema is not compatible with Modellix Design. Choose another model from the live catalog.",
   };
 }
 
@@ -652,11 +793,11 @@ function normalizeGenerationInput(
 function projectGeneration(
   modelId: string,
   job: DesignJob | undefined,
-): ModellixDesignGenerateResult {
+): ModellixMediaGenerateResult {
   if (job === undefined) {
     return {
       version: 1,
-      service: "design",
+      service: "media",
       operation: "generate",
       modelId,
       submitted: true,
@@ -665,13 +806,13 @@ function projectGeneration(
       resources: [],
       diagnostic: {
         code: "job-record-unavailable",
-        message: "The paid request returned without a readable local job record. Do not retry automatically.",
+        message: "The generation returned without a readable local job record. Do not retry automatically.",
       },
     };
   }
   return {
     version: 1,
-    service: "design",
+    service: "media",
     operation: "generate",
     modelId,
     submitted: true,
@@ -688,7 +829,7 @@ function projectGeneration(
   };
 }
 
-function projectJob(job: DesignJob): NonNullable<ModellixDesignTaskResult["job"]> {
+function projectJob(job: DesignJob): NonNullable<ModellixMediaGetResultResult["job"]> {
   return {
     jobId: job.jobId,
     modelId: job.modelId,
@@ -705,7 +846,7 @@ function projectJob(job: DesignJob): NonNullable<ModellixDesignTaskResult["job"]
   };
 }
 
-function projectResources(job: DesignJob): ModellixDesignGenerateResult["resources"] {
+function projectResources(job: DesignJob): ModellixMediaGenerateResult["resources"] {
   return job.resources.map((resource) => ({
     kind: resource.kind,
     url: resource.url,
@@ -815,16 +956,39 @@ function toToolJson(value: DesignJsonValue): ToolJsonValue {
   return value;
 }
 
-function formatModels(value: ModellixDesignModelResult): string {
+function formatModels(value: ModellixMediaListResult): string {
   const lines = value.models.map((model) =>
-    `- ${model.modelId} (${model.kind})${model.available ? "" : " — unavailable"}`);
-  const schema = value.schema === undefined
-    ? ""
-    : `\n\nSchema for ${value.schema.modelId}: primary input ${value.schema.primaryInputPath}; fields ${value.schema.fields.map((field) => field.path).join(", ") || "none"}${value.schema.truncated ? " (truncated)" : ""}.`;
-  return `${lines.length === 0 ? "No matching Modellix Design models." : lines.join("\n")}${value.truncated ? "\n(Results truncated; refine the query.)" : ""}${schema}`;
+    `- ${model.modelId} (${model.taskType ?? model.kind})${model.available ? "" : " — unavailable"}${model.description === undefined ? "" : `: ${model.description}`}`);
+  return `${lines.length === 0 ? "No matching Modellix media models." : lines.join("\n")}${value.truncated ? "\n(Results truncated; refine the query.)" : ""}`;
 }
 
-function formatPreparation(value: ModellixDesignPrepareResult): string {
+function formatSchema(value: ModellixMediaSchemaResult): string {
+  if (!value.available || value.schema === undefined) {
+    return `Schema for ${value.modelId} is unavailable to Modellix Design. ${value.unavailableReason ?? "Choose another model from the live catalog."}`;
+  }
+  const fields = value.schema.fields.map((field) => {
+    const qualifiers = [
+      field.kind,
+      field.required ? "required" : "optional",
+      field.options.length === 0
+        ? null
+        : `allowed values: ${field.options.map((option) => JSON.stringify(option)).join(", ")}`,
+    ].filter((qualifier): qualifier is string => qualifier !== null);
+    return `- ${field.path} (${qualifiers.join("; ")})${field.description === undefined ? "" : ` — ${field.description}`}`;
+  });
+  return [
+    `Schema for ${value.schema.modelId}. Primary input: ${value.schema.primaryInputPath}. Use the exact field descriptions and allowed values below; do not infer a different format.`,
+    fields.length === 0 ? "No input fields." : fields.join("\n"),
+    value.schema.truncated ? "The field list is truncated." : null,
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+function isUnsupportedSchema(error: unknown): boolean {
+  return error instanceof DesignError &&
+    (error.code === "SCHEMA_INVALID" || error.code === "ENDPOINT_NOT_ALLOWED");
+}
+
+function formatPreparation(value: ModellixMediaPrepareResult): string {
   const changes = value.changes.map((change) => `- ${change.path} (${change.label})`).join("\n");
   const conflicts = value.conflicts.length === 0 ? "" : `\nConflicts: ${value.conflicts.join("; ")}`;
   return `${value.summary}\n${changes || "No parameter changes were proposed."}${conflicts}\nReview and explicitly confirm before generation.`;
@@ -864,16 +1028,22 @@ function diagnosticMessage(
   }
 }
 
-function formatGeneration(value: ModellixDesignGenerateResult): string {
+function formatGeneration(value: ModellixMediaGenerateResult): string {
   const resources = value.resources.map((resource) => `- ${resource.kind}: ${resource.url}`).join("\n");
   const diagnostic = value.diagnostic === undefined ? "" : `\n${value.diagnostic.message}`;
-  return `Modellix Design status: ${value.status}${value.jobId === undefined ? "" : ` (${value.jobId})`}.${diagnostic}${resources === "" ? "" : `\n${resources}`}\nDo not automatically repeat this paid submission.`;
+  if (value.status === "running") {
+    return `Modellix media submission accepted${value.jobId === undefined ? "" : ` (${value.jobId})`}.${diagnostic}\nThe result card and Modellix Design now own the current status. Do not inspect it repeatedly or start a replacement in this turn. In ordinary assistant text, say only that submission was accepted and point to those live surfaces; do not use queued, running, generating, processing, pending, or equivalent current-state wording.`;
+  }
+  return `Modellix media status: ${value.status}${value.jobId === undefined ? "" : ` (${value.jobId})`}.${diagnostic}${resources === "" ? "" : `\n${resources}`}\nDo not automatically repeat this submission.`;
 }
 
-function formatTask(value: ModellixDesignTaskResult): string {
-  if (!value.found || value.job === undefined) return "No persisted Modellix Design task matched that identifier.";
+function formatTask(value: ModellixMediaGetResultResult): string {
+  if (!value.found || value.job === undefined) return "No persisted Modellix media task matched that identifier.";
   const resources = value.job.resources.map((resource) => `- ${resource.kind}: ${resource.url}`).join("\n");
-  return `Modellix Design task ${value.job.jobId}: ${value.job.status}.${resources === "" ? "" : `\n${resources}`}`;
+  if (value.job.status === "running") {
+    return `Modellix media submission ${value.job.jobId} remains assigned to the live result card and Modellix Design. Do not inspect it again or start a replacement in this turn. In ordinary assistant text, say only that submission was accepted and point to those live surfaces; do not use queued, running, generating, processing, pending, or equivalent current-state wording.`;
+  }
+  return `Modellix media task ${value.job.jobId}: ${value.job.status}.${resources === "" ? "" : `\n${resources}`}`;
 }
 
 function disposeAll(disposers: readonly (() => unknown)[]): void {

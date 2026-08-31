@@ -196,7 +196,17 @@ export function registerModellixWebProviders(
   registry: ModellixWebRegistry,
   options: ModellixWebProviderOptions,
 ): () => void {
-  const providers = createModellixWebProviders(options);
+  return registerModellixWebProviderInstances(
+    registry,
+    createModellixWebProviders(options),
+  );
+}
+
+/** Register already-created providers so Host tools can share the exact same instances. */
+export function registerModellixWebProviderInstances(
+  registry: ModellixWebRegistry,
+  providers: ModellixWebProviders,
+): () => void {
   const disposeSearch = registry.registerSearchProvider(providers.search);
   let disposeFetch: (() => void) | undefined;
   try {
@@ -635,7 +645,7 @@ function messageFor(contract: ModellixErrorContract): string {
     case "MODELLIX_API_KEY_INVALID":
       return "Modellix rejected the configured API Key";
     case "MODELLIX_BILLING_BLOCKED":
-      return "The Modellix account cannot run this paid Web request";
+      return "The Modellix account cannot run this Web request";
     case "MODELLIX_RATE_LIMITED":
       return "The Modellix Web request was rate limited";
     case "MODELLIX_CANCELED":
@@ -649,7 +659,7 @@ function messageFor(contract: ModellixErrorContract): string {
     case "MODELLIX_BAD_REQUEST":
       return "The Modellix Web request is invalid";
     case "MODELLIX_SUBMIT_UNKNOWN":
-      return "The paid Modellix Web request outcome is unknown; it was not retried";
+      return "The Modellix Web request outcome is unknown; it was not retried";
     default:
       return "The Modellix Web request failed";
   }

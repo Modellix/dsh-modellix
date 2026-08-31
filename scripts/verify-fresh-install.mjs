@@ -232,7 +232,7 @@ assert.deepEqual(
   'Client factory injection requirements changed',
 )
 assert.equal(typeof client?.apply, 'function')
-assert.deepEqual(client?.inject, ['slots', 'locale', 'connection'])
+assert.deepEqual(client?.inject, ['slots', 'locale', 'connection', 'layout'])
 assert.equal(client?.MODELLIX_RPC_CHANNEL, '/modellix')
 console.log('Installed Client bundle syntax, ModuleLoader registration, and factory execution verified.')
 `

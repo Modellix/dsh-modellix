@@ -587,7 +587,7 @@ describe("Credential dialog coordination", () => {
       { container: appRoot },
     );
 
-    await user.click(await screen.findByRole("button", { name: "打开原图" }));
+    await user.click(await screen.findByRole("button", { name: "放大图片" }));
     expect(screen.getByRole("dialog", { name: "生成图片" })).toBeTruthy();
 
     currentSettings = settingsFixture({
@@ -1003,7 +1003,9 @@ describe("Modellix Design view", () => {
       }));
       await submitResponse;
     });
-    expect(await screen.findByText("进行中")).toBeTruthy();
+    expect(await screen.findByText("生成中")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "预览" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "JSON" })).toBeNull();
   });
 
   it("edits Schema parameters, proposes/applies changes, and presents every media result safely", async () => {
@@ -1131,15 +1133,32 @@ describe("Modellix Design view", () => {
     expect(screen.getByRole("img", { name: "生成结果预览" })).toBeTruthy();
     expect(screen.getByLabelText("生成视频结果预览")).toBeTruthy();
     expect(screen.getByLabelText("生成音频结果预览")).toBeTruthy();
-    const downloads = screen.getAllByRole("link", { name: /下载结果/u });
+    const downloads = screen.getAllByRole("link", { name: "下载" });
     expect(downloads).toHaveLength(3);
     for (const link of downloads) {
       expect(link.getAttribute("rel")).toBe("noopener noreferrer");
       expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
     }
     expect(screen.getByText("generation-failed")).toBeTruthy();
+    const failedCard = screen.getByText("generation-failed").closest(".mdlx-result-card");
+    expect(failedCard?.querySelector(".mdlx-result-tabs")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "打开原图" }));
+    const resultCards = view.container.querySelectorAll<HTMLDetailsElement>(
+      ".mdlx-result-card > .mdlx-result-disclosure",
+    );
+    expect(resultCards).toHaveLength(4);
+    expect([...resultCards].every((card) => card.open)).toBe(true);
+    const firstSummary = resultCards[0]?.querySelector<HTMLElement>(
+      ".mdlx-result-card-summary",
+    );
+    expect(firstSummary).toBeTruthy();
+    await user.click(firstSummary!);
+    expect(resultCards[0]?.open).toBe(false);
+    expect(resultCards[1]?.open).toBe(true);
+    await user.click(firstSummary!);
+    expect(resultCards[0]?.open).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "放大图片" }));
     expect(screen.getByRole("dialog", { name: "生成图片" })).toBeTruthy();
     expect(screen.getAllByRole("img", { name: "生成结果预览" })).toHaveLength(2);
     fireEvent.keyDown(document, { key: "Escape" });

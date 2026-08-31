@@ -1,19 +1,19 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type {
-  PreToolDecision,
   ToolDefinition,
-  ToolExecution,
   ToolRunContext,
 } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it, vi } from "vitest";
 
-import { DesignError } from "../../../src/design/index.js";
+import { DesignError, MediaUploadClient } from "../../../src/design/index.js";
 import type { DesignSnapshotWire } from "../../../src/host/design-controller.js";
 import {
-  MODELLIX_DESIGN_GENERATE_TOOL,
-  MODELLIX_DESIGN_MODELS_TOOL,
-  MODELLIX_DESIGN_PREPARE_TOOL,
-  MODELLIX_DESIGN_TASK_TOOL,
+  MODELLIX_MEDIA_GENERATE_TOOL,
+  MODELLIX_MEDIA_GET_RESULT_TOOL,
+  MODELLIX_MEDIA_LIST_TOOL,
+  MODELLIX_MEDIA_PREPARE_TOOL,
+  MODELLIX_MEDIA_SCHEMA_TOOL,
+  MODELLIX_MEDIA_UPLOAD_FILE_TOOL,
   createModellixDesignToolDefinitions,
   registerModellixDesignTools,
   type DesignToolController,
@@ -35,6 +35,8 @@ function snapshot(
         id: MODEL_ID,
         label: "GPT Image 2",
         kind: "image",
+        taskType: "text-to-image",
+        description: "Create a new image from a text prompt.",
         featured: true,
         available: true,
         unavailableReason: null,
@@ -106,8 +108,9 @@ function execution(sessionId = "session-1", signal = new AbortController().signa
 function definition(
   controller: DesignToolController,
   name: string,
+  uploadClient?: MediaUploadClient,
 ): ToolDefinition {
-  const found = createModellixDesignToolDefinitions(controller).find(
+  const found = createModellixDesignToolDefinitions(controller, uploadClient).find(
     (candidate) => candidate.name === name,
   );
   if (found === undefined) throw new Error(`missing tool ${name}`);
@@ -115,17 +118,19 @@ function definition(
 }
 
 describe("Modellix Design tools", () => {
-  it("publishes only the four fixed modellix_design names", () => {
+  it("publishes the six fixed Modellix media tool names", () => {
     const controller = { handle: vi.fn() } as unknown as DesignToolController;
     expect(createModellixDesignToolDefinitions(controller).map((item) => item.name)).toEqual([
-      MODELLIX_DESIGN_MODELS_TOOL,
-      MODELLIX_DESIGN_PREPARE_TOOL,
-      MODELLIX_DESIGN_GENERATE_TOOL,
-      MODELLIX_DESIGN_TASK_TOOL,
+      MODELLIX_MEDIA_LIST_TOOL,
+      MODELLIX_MEDIA_SCHEMA_TOOL,
+      MODELLIX_MEDIA_PREPARE_TOOL,
+      MODELLIX_MEDIA_UPLOAD_FILE_TOOL,
+      MODELLIX_MEDIA_GENERATE_TOOL,
+      MODELLIX_MEDIA_GET_RESULT_TOOL,
     ]);
   });
 
-  it("searches models, returns a compact schema, and injects a safe session id", async () => {
+  it("lists models and injects a safe session id", async () => {
     const calls: { endpoint: string; payload: unknown }[] = [];
     const controller: DesignToolController = {
       async handle(endpoint, payload) {
@@ -133,24 +138,123 @@ describe("Modellix Design tools", () => {
         return snapshot();
       },
     };
-    const tool = definition(controller, MODELLIX_DESIGN_MODELS_TOOL);
+    const tool = definition(controller, MODELLIX_MEDIA_LIST_TOOL);
     const result = await tool.execute(
-      { query: "image", model: MODEL_ID, limit: 10 },
+      { query: "image", limit: 10 },
       execution("unsafe/session id"),
     ) as {
       models: { modelId: string }[];
-      schema?: { primaryInputPath: string; fields: { path: string }[] };
     };
 
-    expect(result.models).toEqual([{ modelId: MODEL_ID, label: "GPT Image 2", kind: "image", featured: true, available: true }]);
+    expect(result.models).toEqual([{
+      modelId: MODEL_ID,
+      label: "GPT Image 2",
+      kind: "image",
+      taskType: "text-to-image",
+      description: "Create a new image from a text prompt.",
+      featured: true,
+      available: true,
+    }]);
+    expect(calls.map((call) => call.endpoint)).toEqual(["design/read"]);
+    const firstPayload = calls[0]?.payload as { sessionId: string };
+    expect(firstPayload.sessionId).toMatch(/^tool_[a-f0-9]{48}$/u);
+    expect(firstPayload.sessionId).not.toContain("unsafe");
+  });
+
+  it("returns the compact schema for one exact live model", async () => {
+    const endpoints: string[] = [];
+    const controller: DesignToolController = {
+      async handle(endpoint) {
+        endpoints.push(endpoint);
+        return snapshot();
+      },
+    };
+    const tool = definition(controller, MODELLIX_MEDIA_SCHEMA_TOOL);
+    const result = await tool.execute({ model: MODEL_ID }, execution()) as {
+      modelId: string;
+      available: boolean;
+      schema: { primaryInputPath: string; fields: { path: string }[] };
+    };
+
+    expect(result).toMatchObject({ modelId: MODEL_ID, available: true });
     expect(result.schema).toMatchObject({
       primaryInputPath: "/prompt",
       fields: [{ path: "/prompt" }, { path: "/quality" }],
     });
-    expect(calls.map((call) => call.endpoint)).toEqual(["design/read", "design/select-model"]);
-    const firstPayload = calls[0]?.payload as { sessionId: string };
-    expect(firstPayload.sessionId).toMatch(/^tool_[a-f0-9]{48}$/u);
-    expect(firstPayload.sessionId).not.toContain("unsafe");
+    expect(endpoints).toEqual(["design/read", "design/select-model"]);
+  });
+
+  it("returns a recoverable result when a catalog model has no compatible Design schema", async () => {
+    const controller: DesignToolController = {
+      async handle(endpoint) {
+        if (endpoint === "design/select-model") {
+          throw new DesignError("SCHEMA_INVALID", "unsupported schema");
+        }
+        return snapshot();
+      },
+    };
+    const tool = definition(controller, MODELLIX_MEDIA_SCHEMA_TOOL);
+    const result = await tool.execute({ model: MODEL_ID }, execution());
+
+    expect(result).toEqual({
+      version: 1,
+      service: "media",
+      operation: "schema",
+      modelId: MODEL_ID,
+      available: false,
+      unavailableReason: "This model's API schema is not compatible with Modellix Design. Choose another model from the live catalog.",
+    });
+  });
+
+  it("uploads a conversation image with the Host credential and returns only safe metadata", async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      data: {
+        file_id: "file_tool_test",
+        type: "image",
+        url: "https://cdn.example.test/reference.png",
+        filename: "reference.png",
+        size: 8,
+      },
+    }), { headers: { "content-type": "application/json" } }));
+    const uploadClient = new MediaUploadClient({ fetch: request as typeof fetch });
+    const controller: DesignToolController = {
+      handle: vi.fn(),
+      resolveCredential: () => Promise.resolve("test-credential"),
+    };
+    const tool = definition(controller, MODELLIX_MEDIA_UPLOAD_FILE_TOOL, uploadClient);
+    const result = await tool.execute({ attachment_id: "attachment-1" }, {
+      signal: new AbortController().signal,
+      agent: {
+        id: "session-1",
+        session: {
+          header: { cwd: "D:/workspace" },
+          deriveMessages: () => [{
+            content: [{
+              type: "image",
+              attachment: {
+                attachmentId: "attachment-1",
+                mediaType: "image/png",
+                name: "reference.png",
+              },
+            }],
+          }],
+        },
+        ctx: {
+          attachments: {
+            readImage: () => Promise.resolve({
+              data: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            }),
+          },
+        },
+      },
+    } as unknown as ToolRunContext) as { url: string; noAutomaticRetry: boolean };
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      url: "https://cdn.example.test/reference.png",
+      noAutomaticRetry: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("test-credential");
   });
 
   it("prepares a visible proposal without calling Design submit", async () => {
@@ -170,7 +274,7 @@ describe("Modellix Design tools", () => {
         });
       },
     };
-    const tool = definition(controller, MODELLIX_DESIGN_PREPARE_TOOL);
+    const tool = definition(controller, MODELLIX_MEDIA_PREPARE_TOOL);
     const result = await tool.execute(
       { model: MODEL_ID, instruction: "a red fox" },
       execution(),
@@ -202,7 +306,7 @@ describe("Modellix Design tools", () => {
         return endpoint === "design/submit" ? snapshot({ jobs: [job] }) : snapshot();
       },
     };
-    const tool = definition(controller, MODELLIX_DESIGN_GENERATE_TOOL);
+    const tool = definition(controller, MODELLIX_MEDIA_GENERATE_TOOL);
     const result = await tool.execute(
       { model: MODEL_ID, prompt: "a red fox", input: { quality: "high" } },
       execution(),
@@ -223,7 +327,7 @@ describe("Modellix Design tools", () => {
     expect(JSON.stringify(calls)).not.toMatch(/api.?key|authorization/iu);
   });
 
-  it("rejects deeply nested Generate input before recursive normalization or paid submit", async () => {
+  it("rejects deeply nested Generate input before recursive normalization or submit", async () => {
     const endpoints: string[] = [];
     const controller: DesignToolController = {
       async handle(endpoint) {
@@ -235,7 +339,7 @@ describe("Modellix Design tools", () => {
     for (let depth = 0; depth <= DESIGN_WIRE_LIMITS.maxJsonDepth; depth += 1) {
       nested = [nested];
     }
-    const tool = definition(controller, MODELLIX_DESIGN_GENERATE_TOOL);
+    const tool = definition(controller, MODELLIX_MEDIA_GENERATE_TOOL);
 
     await expect(tool.execute(
       { model: MODEL_ID, input: { prompt: nested } },
@@ -248,7 +352,7 @@ describe("Modellix Design tools", () => {
     expect(endpoints).not.toContain("design/submit");
   });
 
-  it("normalizes an ambiguous paid POST to a non-retryable canonical result", async () => {
+  it("normalizes an ambiguous generation POST to a non-retryable canonical result", async () => {
     let submits = 0;
     const controller: DesignToolController = {
       async handle(endpoint) {
@@ -262,7 +366,7 @@ describe("Modellix Design tools", () => {
         return snapshot();
       },
     };
-    const tool = definition(controller, MODELLIX_DESIGN_GENERATE_TOOL);
+    const tool = definition(controller, MODELLIX_MEDIA_GENERATE_TOOL);
     const result = await tool.execute(
       { model: MODEL_ID, prompt: "a red fox" },
       execution(),
@@ -278,7 +382,7 @@ describe("Modellix Design tools", () => {
 
   it("rejects unknown top-level arguments before any Host call", async () => {
     const handle = vi.fn();
-    const tool = definition({ handle }, MODELLIX_DESIGN_GENERATE_TOOL);
+    const tool = definition({ handle }, MODELLIX_MEDIA_GENERATE_TOOL);
     await expect(tool.execute(
       { model: MODEL_ID, prompt: "safe", apiKey: "must-not-be-accepted" },
       execution(),
@@ -288,7 +392,7 @@ describe("Modellix Design tools", () => {
 
   it("does not dispatch work when the Tool signal is already aborted", async () => {
     const handle = vi.fn();
-    const tool = definition({ handle }, MODELLIX_DESIGN_MODELS_TOOL);
+    const tool = definition({ handle }, MODELLIX_MEDIA_LIST_TOOL);
     const abort = new AbortController();
     abort.abort();
     await expect(tool.execute({}, execution("session-1", abort.signal))).rejects.toMatchObject({
@@ -299,7 +403,7 @@ describe("Modellix Design tools", () => {
 
   it("requires the Host-provided agent session instead of accepting one in args", async () => {
     const handle = vi.fn();
-    const tool = definition({ handle }, MODELLIX_DESIGN_MODELS_TOOL);
+    const tool = definition({ handle }, MODELLIX_MEDIA_LIST_TOOL);
     await expect(tool.execute({}, { signal: new AbortController().signal } as ToolRunContext))
       .rejects.toThrow("requires an active Harness session");
     expect(handle).not.toHaveBeenCalled();
@@ -324,7 +428,7 @@ describe("Modellix Design tools", () => {
     const controller: DesignToolController = {
       handle: () => Promise.resolve(snapshot({ jobs: [job] })),
     };
-    const tool = definition(controller, MODELLIX_DESIGN_TASK_TOOL);
+    const tool = definition(controller, MODELLIX_MEDIA_GET_RESULT_TOOL);
     const result = await tool.execute({ task_id: "task-123" }, execution()) as {
       found: boolean;
       job?: { resources: { url: string }[] };
@@ -334,20 +438,11 @@ describe("Modellix Design tools", () => {
     expect(result.job?.resources).toEqual([{ kind: "image", url: "https://cdn.example.test/result.png", expiresAt: "2026-09-01T00:00:00.000Z" }]);
   });
 
-  it("registers distinct one-shot approval gates for LLM prepare and paid generate", async () => {
+  it("registers all media tools without a redundant pre-execution approval gate", () => {
     const definitions: ToolDefinition[] = [];
-    let listener: ((
-      exec: ToolExecution,
-      next: () => Promise<PreToolDecision>,
-    ) => Promise<PreToolDecision>) | undefined;
-    const disposeListener = vi.fn();
-    const disposeDefinitions = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    const disposeDefinitions = Array.from({ length: 6 }, () => vi.fn());
     const ctx = {
-      on(name: string, callback: typeof listener) {
-        expect(name).toBe("tools/pre-execute");
-        listener = callback;
-        return disposeListener;
-      },
+      on: vi.fn(),
       tools: {
         register(item: ToolDefinition) {
           definitions.push(item);
@@ -358,32 +453,10 @@ describe("Modellix Design tools", () => {
     const controller = { handle: vi.fn() } as unknown as DesignToolController;
 
     const dispose = registerModellixDesignTools(ctx, controller);
-    expect(definitions).toHaveLength(4);
-    if (listener === undefined) throw new Error("approval listener was not registered");
-    const approved = await listener(
-      { name: MODELLIX_DESIGN_GENERATE_TOOL } as ToolExecution,
-      () => Promise.resolve({ kind: "allow" }),
-    );
-    const readOnly = await listener(
-      { name: MODELLIX_DESIGN_MODELS_TOOL } as ToolExecution,
-      () => Promise.resolve({ kind: "allow" }),
-    );
-    const prepared = await listener(
-      { name: MODELLIX_DESIGN_PREPARE_TOOL } as ToolExecution,
-      () => Promise.resolve({ kind: "allow" }),
-    );
-    expect(approved).toMatchObject({
-      kind: "ask",
-      reason: expect.stringContaining("paid Modellix Design generation"),
-    });
-    expect(prepared).toMatchObject({
-      kind: "ask",
-      reason: expect.stringContaining("Modellix LLM request"),
-    });
-    expect(readOnly).toEqual({ kind: "allow" });
+    expect(definitions).toHaveLength(6);
+    expect(ctx.on).not.toHaveBeenCalled();
 
     dispose();
-    expect(disposeListener).toHaveBeenCalledOnce();
     disposeDefinitions.forEach((candidate) => expect(candidate).toHaveBeenCalledOnce());
   });
 });

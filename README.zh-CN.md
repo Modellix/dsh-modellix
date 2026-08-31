@@ -2,34 +2,42 @@
 
 # dsh-modellix
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 Modellix Profile Bundle：只需一个 Modellix API Key，即可使用 Schema 驱动的 Design 媒体生成、实时 LLM 模型目录和原生 Web Provider。
+`dsh-modellix` 将 Modellix 媒体生成、LLM 模型和 Web 研究能力接入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。配置一个 Modellix API Key 后，即可通过 Chat-first 流程自然表达需求，让图片、视频、音频及其上下文留在同一会话中。
 
 > Harness 与本插件当前都使用预发布接口。升级 Harness 前，请核对本包的 peer dependencies 和 [CHANGELOG](CHANGELOG.md)。
 
-![真实 Harness 会话中的中文 Modellix Design 桌面布局，左侧为模型与参数，右侧为结果](docs/assets/design-desktop-zh.webp)
+![真实中文 Harness 会话中已完成的 Modellix 图片结果](docs/assets/chat-media-generation-zh.webp)
 
-## 功能概览
+## 0.2.0 的主要变化
 
-| 功能 | 用户体验 | 实际行为 |
+- 删除独立 Design Tab，对话成为媒体创作主界面。
+- 新增 6 个明确的媒体 Agent 工具，覆盖模型目录、Schema、参数准备、文件上传、生成和结果查询。
+- 新增明确的 Modellix Web Search/Fetch 工具，使 Agent 在需要实时信息或来源核验时能够自动调用。
+- 将 **Modellix Design** 放在会话右侧面板：桌面端内部宽度固定为 360px，窄屏使用全宽；开合过程中内容不会被压缩变形。
+- 新增对话内实时结果卡。提交卡会在后台任务结束后原位更新，一次结果查询不会再渲染第二张重复卡片。
+- 新增会话隔离的结果历史、结果列表与单卡折叠、图片放大、视频/音频播放器、**添加 URL 到对话框** 和 **下载**。
+- 高级精准参数编辑器代码继续保留，但本版本暂时隐藏入口，优先完成普通用户的无感对话体验。
+- UI 不再显示常规付费提醒。配置 Modellix Key 已代表用户具备用量预期，消耗与明细可在 Modellix 查看。
+
+## 功能能力
+
+| 区域 | 用户体验 | 已注册能力 |
 | --- | --- | --- |
-| Design | 左侧选择模型、输入提示词和调整参数，右侧查看任务与结果 | 实时读取图片、视频和音频模型及其公开 Schema；计费生成只提交一次 |
-| LLM | 在 Harness 模型选择器中快速切换 Modellix 模型 | 把实时目录合并到 Harness 的 `llm-pi-ai` Modellix Provider |
-| Web | 使用 Harness 原生 `web_search` 与 `web_fetch` | 注册 Modellix Search/Fetch Provider，不创建同名自定义 Tool |
-
-首次配置弹窗包含 API Key 输入框以及 Design、LLM、Web 三个开关，三个开关默认全部开启，之后可在 Modellix 设置页分别关闭。
+| 媒体 | 直接让 Agent 创建、编辑、动画化或配音 | `modellix_media_list`、`modellix_media_schema`、`modellix_media_prepare`、`modellix_media_upload_file`、`modellix_media_generate`、`modellix_media_get_result` |
+| 结果 | 在对话卡片或会话右侧面板中查看作品 | 实时状态收敛、成功任务 Preview/JSON、图片/视频/音频展示、URL 插入、下载 |
+| LLM | 在 Harness 模型选择器中选择实时 Modellix 模型 | Modellix OpenAI 兼容 Provider、实时目录、Provider 重试次数为 `0` |
+| Web | 正常提出实时、外部、URL 或来源核验问题 | Agent 自动选择 `modellix_web_search` 和 `modellix_web_fetch` |
 
 ## 环境要求
 
 - DeepSeek Harness `0.1.1-rc.2`
 - 已发布包运行时：Node.js `^22.19.0 || >=24.0.0`
-- 源码开发与发布校验：Node.js `24.18.1`、pnpm `11.24.0`（以 `.nvmrc` 与 `packageManager` 为准）
-- 一个有效的 [Modellix API Key](https://docs.modellix.ai/get-started)
+- 源码开发与发布校验：Node.js `24.18.1`、pnpm `11.24.0`
+- 有效的 [Modellix API Key](https://docs.modellix.ai/get-started)
 
-`dsh-modellix` 自带 Harness 集成，运行时不会安装或调用 `modellix-cli`。
+插件自带 Harness 集成，运行时不会安装或调用 `modellix-cli`。
 
 ## 安装
-
-需要从当前源码在 Windows 本机完整安装和启动时，请直接阅读 [dsh-modellix 本地使用指南](docs/zh-CN/LOCAL_USAGE.md)；同时提供[英文版本](docs/en-US/LOCAL_USAGE.md)。
 
 将已发布包安装到目标 Web profile，检查合并后的配置，然后启动或重启该 profile：
 
@@ -39,94 +47,136 @@ dsh --profile web --dump-config
 dsh --profile web
 ```
 
-`--dump-config` 应显示 `dsh-modellix` Bundle 层和 id 为 `modellix` 的插件行。若使用其他 profile，请把命令中的 `web` 替换为对应名称。
+`--dump-config` 应包含 `dsh-modellix` Bundle 层和 id 为 `modellix` 的插件行。若使用其他 profile，请替换命令中的 `web`。
 
-也可以从可信源码构建 tarball 后安装：
+也可以安装可信源码构建出的 tarball：
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.1.1.tgz
+dsh plugin --profile web add ./dsh-modellix-0.2.0.tgz
 ```
 
-直接从 Git 安装 TypeScript 源码要求安装阶段能生成 `lib/`。包未提供经过验证的 `prepare` 流程时，请使用已发布包或本地 tarball。
+完整 Windows 本地流程见[本地使用指南](docs/zh-CN/LOCAL_USAGE.md)。
 
-## 首次配置
+## 配置 API Key
 
-1. 打开 Harness Web UI，等待“连接 Modellix”弹窗。
-2. 输入 API Key，并确认 Design、LLM、Web 三个默认开启的开关是否符合需要。
-3. 选择“保存并启用”。保存成功后，浏览器不再回显 Key，只显示 Credential 状态和来源。
-4. 暂时不配置时可选择“稍后处理”。这不会把插件标记为可用；下次显式使用已开启且需要凭据的 Modellix 能力时会再次提示。
+首次使用时，在 **连接 Modellix** 中输入 Key，保留需要启用的服务，然后选择 **保存并启用**。已保存 Credential 是 write-only：Client 只会收到配置状态和来源，不会收到已存 Key。
 
-API Key 可以来自两处：
+也可以在 Harness 启动环境中提供 `MODELLIX_API_KEY`。环境来源 Credential 在 UI 中只读，更换后需要重启 Harness。
 
-- 在首次配置或设置页输入，由 Harness Credential 服务保存。
-- 由 Harness 启动环境中的 `MODELLIX_API_KEY` 提供。环境来源在 UI 中只读；更新后必须重启 Harness。
+不要把真实 Key 放入仓库、命令参数、URL、浏览器存储、日志、截图、HAR、录像或测试快照。
 
-不要把真实 Key 写入仓库、命令参数、日志、截图、HAR、录像或测试快照。
+## Chat-first 媒体流程
 
-完整配置说明见[用户指南：首次配置与 Credential](docs/zh-CN/USER_GUIDE.md#首次配置)。
+用户只需描述目标，不必列出工具顺序。例如：
 
-## 快速使用
+> 创建一张精致的 16:9 建筑首页图：玻璃植物研究馆漂浮在晨曦云海上，以优雅观景桥连接，青金蓝与暖金配色，真实高级材质，无人物、无文字、无水印。
 
-### Design：生成图片、视频或音频
+Agent 会按实际情况：
 
-1. 打开 Harness 的 **Design** 视图。
-2. 搜索、按输出类型筛选并选择模型。插件会优先恢复最近选择的可用模型，否则从当前目录中选择推荐的可用模型。
-3. 输入主提示词。很多模型只需提示词即可使用；其余字段由模型当前的 `api_schema` 决定，并自动填充公开默认值。
-4. 需要精准控制时，直接编辑枚举、开关、数值、文本或 JSON 参数；不满足 Schema 约束的值会阻止提交。
-5. 需要自然语言改参时，在“用对话调整参数”中描述修改。该操作使用同一个 Key 调用固定的 `openai/gpt-5.6-luna`，可能产生 LLM 用量；它只生成待确认差异，不会自动生成媒体。
-6. 检查参数和计费提示后，点击一次“确认并生成”。计费 POST 不自动重试；只读任务状态查询会在有限范围内安全重试。
-7. 右侧结果区按“进行中 / 已完成 / 诊断”展示记录，支持图片放大、视频和音频播放以及安全下载。
+1. 若尚未知道合适模型，先查询实时媒体模型目录。
+2. 读取目标模型的实时 API Schema，只使用公开字段和允许值。
+3. 对“继续修改、把上一张图做成视频、保持主体和构图”等请求，自动复用本会话最新相关结果 URL，选择图生图、图片编辑、图生视频或视频编辑模型，而不是退回文生图/文生视频。
+4. 当 Schema 要求公开媒体 URL 时，上传本地文件或会话附件。
+5. 生成请求只提交一次；未知提交结果不会自动重放。
+6. Agent 回合内最多查询一次，之后由后台监听器持续更新现有卡片，不需要 Agent 再调用结果工具。
 
-例如，选择一个当前 Schema 提供 `quality` 和 `size` 参数的可用图片模型，然后输入本次验收提示词：
+任务尚未结束时，不可变的助手正文只说明“提交已接受”，并引导查看实时结果卡和 Modellix Design；不会永久留下“生成中”这种过期状态。
 
-> A premium editorial architectural photograph of a quiet cliffside library above a misty alpine lake at blue hour, carved pale stone arches, warm amber reading lamps, one thoughtful reader, subtle greenery, natural reflections, cinematic but realistic lighting, restrained navy and ivory palette, precise composition, no text, no logo.
+### 结果行为
 
-这就是文档中真实 API 图片实际使用的完整提示词，并非简化占位示例。下方截图是在真实 Design 结果列表显示任务完成后拍摄的。
+- **生成中与失败：** 只显示简洁的头部和状态；没有成功资源时不显示 Preview/JSON。
+- **已完成：** 显示 Preview/JSON。图片可在带焦点管理的弹窗中放大，视频和音频使用原生播放器。
+- **一个任务一张卡：** `generate` 卡持有任务展示权；同一任务的 `get_result` 调用不会重复渲染。
+- **会话隔离：** 右侧面板只显示当前 Harness 会话所属任务；没有会话归属的旧记录不会注入新会话。
+- **快捷操作：** **添加 URL 到对话框** 会把资源 URL 写入输入框；**下载** 安全打开上游资源。
+- **有效期：** 优先使用上游有效期；若上游未返回，插件应用七天本地展示期限，但不会延长上游 URL，也不会永久保存媒体副本。
 
-把 `quality` 设为 `high`、`size` 设为 `1536x1024`，其他字段保留模型当前默认值。可以直接精准修改这两个控件，也可以让参数助手生成两项变更提议，再检查差异并应用。参数提议可能产生 LLM 用量，但不会生成图片；只有最后一次“确认并生成”会发起计费媒体请求，插件不会自动重试。若所选模型的实时 Schema 没有这两个字段，不要手动添加，应只使用该模型实际公开的参数和值。
+![中文 Modellix Design 右侧面板显示当前会话的三个结果](docs/assets/design-results-drawer-zh.webp)
 
-结果仅在上游资源仍有效时可访问。上游未提供有效期时，插件采用 7 天本地展示上限；这不会延长上游 URL 的真实有效期，也不会把媒体复制成永久本地资产。
+![真实生成视频在对话中播放，同时保留会话结果面板](docs/assets/media-players-zh.webp)
 
-### LLM：快速切换模型
+## Modellix Design 右侧面板
 
-1. 保持 LLM 开关开启并配置有效 Key。
-2. 在 Modellix 设置页查看目录状态、模型数和最近刷新时间；需要时手动刷新。
-3. 在 Harness 模型选择器的 Modellix Provider 下选择目标模型。新选择从下一次模型调用开始生效。
+**Modellix Design** 按钮位于会话头部最右侧，与 **Session log** 风格一致。大屏打开分屏侧面板，窄屏改为全宽覆盖。
 
-LLM 使用 OpenAI Completions 兼容地址 `https://llm.modellix.ai/v1`。插件将 Provider 自动重试上限设为 `0`，避免在插件层重复模型调用；目录不可用时不会虚构静态模型列表。
+- 整个结果列表默认展开，可点击收起。
+- 每张结果卡默认展开，可点击卡片头部收起。
+- 点击 X 关闭后，焦点会回到入口按钮。
+- 高级精准参数编辑器已保留，但 `0.2.0` 暂不显示入口；普通用户通过 Chat 使用。
+- 560px 及以下使用可用视口全宽；360px 及以下入口变为可触达的紧凑按钮。
 
-### Web：搜索与抓取
+## LLM 模型
 
-Web 开关开启且 Key 可用时，可以让 Harness 先搜索公开网页，再按需抓取某条结果。原生 `web_search` 和 `web_fetch` 通过 Modellix Provider 执行，插件不会新增重复的 Tool UI。关闭 Web 或缺少有效 Key 时 Provider 不可用。Web 请求可能产生 Modellix 用量，Provider 不会自动重试；若一次可能计费的 Fetch 结果未知，应先检查 Harness 对话记录或 Modellix 侧记录，再决定是否手动重复。
+开启 LLM 后，插件读取 Modellix 实时目录，并将模型加入 Harness 模型选择器。目录不可用时不会虚构回退列表。Modellix 设置页可查看目录健康、模型数量、刷新时间并手动刷新。
 
-## 设置、状态与恢复
+![中文 Harness 模型选择器中的 Modellix 实时目录](docs/assets/llm-model-selector-zh.webp)
 
-Modellix 设置页提供：
+## 自动 Web Search 与 Fetch
 
-- Credential 的配置状态、来源、验证状态，以及本地 Credential 的更换和移除；
-- Design、LLM、Web 三个独立开关；
-- LLM 目录健康状态、模型数、最近刷新时间和手动刷新。
+用户不需要说出工具名。遇到实时、变化中、外部或需要来源核验的问题，Agent 会使用 `modellix_web_search`；用户提供公开 URL，或搜索结果需要阅读全文时，会使用 `modellix_web_fetch`。
 
-只有明确的 HTTP 401 才会把当前 Credential 标记为无效并触发恢复提示。402、429、网络错误和 5xx 都不会被误报为 Key 失效。若环境变量来源的 Key 无效，请在启动环境中更新 `MODELLIX_API_KEY` 并重启 Harness；UI 不能覆盖它。
+明确的 Modellix 工具与 Harness 原生 Provider 共用底层服务，但路由规则会阻止同一操作同时调用两套工具。失败或结果未知的 Web 请求不会自动重复。
 
-插件统一协调所有恢复弹窗：并发 401 只产生一个 Credential 弹窗；已经打开的本地 Key 编辑器会原位升级为恢复语义；若当前正在显示移除确认或图片预览，恢复会等它关闭后再出现，不会叠窗。保存替换 Key 后，再手动重试原本的能力；环境变量来源则必须在 UI 外更新并重启 Harness。
+![真实中文 Agent 回合自动使用 Modellix Search 与 Fetch](docs/assets/web-tools-auto-zh.webp)
 
-连接中断导致计费提交结果未知时，Design 会显示“提交结果未知”。请先检查结果列表或 Modellix 侧记录，不要自动或连续重提，以免重复计费。
+## 设置与恢复
+
+Modellix 设置页包括：
+
+- Credential 是否已配置、验证状态和来源；
+- 本地可写 Credential 的更换与移除；
+- Design、LLM、Web 独立开关；
+- LLM 实时目录健康、数量、刷新时间和手动刷新。
+
+只有 HTTP 401 会把 Credential 标记为无效。HTTP 402、429、网络错误和 5xx 使用各自恢复状态。并发 401 会合并为一个 Credential 弹窗。
+
+![中文 Modellix 设置页显示 write-only Credential 状态与实时目录](docs/assets/settings-ready-zh.webp)
 
 ## 可访问性与响应式
 
-- 弹窗打开时显式管理初始焦点、`Tab` / `Shift+Tab` 循环、背景 inert 和关闭后的焦点恢复。
-- 强制 Credential 门禁不会通过 Escape 或遮罩隐式关闭，但始终提供可见的“稍后处理”；普通确认弹窗支持 Escape。
-- 字段具有可见标签、错误关联、忙碌状态和实时状态播报；状态不只依赖颜色。
-- Design 容器宽于 `992px` 时采用左聊右结果；宿主插槽较窄时自动改为单列，并保留 `768px` 视口兜底。目标覆盖 `320px`、200% 文本缩放、浅色/深色、forced-colors、粗指针 48px 点击区和 reduced motion。
-- UI 文案跟随 Harness 当前语言；`README.md` 是默认英文入口，本文件提供完整中文版本。
+- Dialog 显式管理初始焦点、Tab/Shift+Tab 循环、背景 inert、允许场景下的 Escape，以及关闭后的焦点恢复。
+- 结果 Tab 支持标准键盘导航；任务与结果变化通过 polite live region 播报。
+- 状态不只依赖颜色，同时提供文字。
+- 已检查 320、560、768、1440 CSS px、200% 文本缩放、浅色/深色、forced-colors、粗指针和 reduced motion。
+- 窄屏仍保留全部结果操作，不产生页面横向溢出。
+
+## 文档
+
+- [完整中文用户指南](docs/zh-CN/USER_GUIDE.md)
+- [中文发布与验收清单](docs/zh-CN/RELEASE_CHECKLIST.md)
+- [Complete English user guide](docs/en-US/USER_GUIDE.md)
+- [English release and acceptance checklist](docs/en-US/RELEASE_CHECKLIST.md)
+- [本地源码使用](docs/zh-CN/LOCAL_USAGE.md)
+
+仓库包含 6 张英文和 6 张中文 1920×1080 截图，分别来自真实语言会话，覆盖设置、对话生图、结果抽屉、媒体播放器、实时 LLM 模型和自动 Search/Fetch。所有截图均不包含 Key、请求头、Network/HAR、Credential 文件或浏览器存储。
+
+## 开发与发布校验
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run verify:pack
+pnpm run verify:fresh-install
+pnpm run verify:node22-install
+pnpm run verify:release:static
+```
+
+`pnpm run verify:release` 还要求仓库外的浏览器与真实 API/Agent Evidence，并绑定准确的包版本和 40 位 Git commit。完整流程见[发布与验收清单](docs/zh-CN/RELEASE_CHECKLIST.md)。
+
+## 当前限制
+
+- 本版本暂时隐藏高级精准参数编辑器入口。
+- 尚未暴露上游任务取消能力。
+- 结果历史保存任务元数据与上游 URL，不保存永久媒体副本。
+- 遇到无法安全支持的复杂 Schema 时阻止提交，不猜测或丢弃约束。
+- Modellix LLM 目录没有虚构的离线回退模型。
 
 ## 卸载
 
-如果 Key 存在本地可写 Credential 中，建议先在 Modellix 设置页移除；环境变量来源应由外部启动环境或密钥管理器撤销。然后从目标 profile 移除插件并重启：
+本地存储的 Credential 应先在 Modellix 设置页移除；环境来源 Credential 应在外部密钥管理器中撤销。然后移除插件并重启 profile：
 
 ```sh
 dsh plugin --profile web remove dsh-modellix
@@ -134,128 +184,13 @@ dsh --profile web --dump-config
 dsh --profile web
 ```
 
-卸载插件不会承诺自动清理外部环境变量、上游任务或所有 Harness 持久化数据；如有合规要求，请分别在对应系统中处理。
-
-## 界面预览与安全截图
-
-- [完整中文用户指南](docs/zh-CN/USER_GUIDE.md)
-- [Complete English user guide](docs/en-US/USER_GUIDE.md)
-- [English README](README.md)
-
-当前仓库包含 6 张从真实已配置 Harness 会话截取的中文全屏图，英文指南另用同流程的 6 张英文图。截图使用实时 Modellix 目录、真实 Schema 约束参数提议、一次已完成的 `gpt-image-2` 结果、真实 Modellix LLM 调用与原生 Web Search/Fetch；不含 API Key、Network 请求详情、HAR 或 Credential 文件：
-
-| 建议文件 | Alt 文本 |
-| --- | --- |
-| `docs/assets/settings-ready-zh.webp` | 中文 Modellix 设置页显示已验证本机 Credential、三个功能开关和 26 个实时 LLM 模型 |
-| `docs/assets/design-desktop-zh.webp` | 中文 Modellix Design 双栏桌面工作区，使用实时 `gpt-image-2` Schema |
-| `docs/assets/design-proposal-zh.webp` | 中文真实参数提议，显示 Schema 合法的前后值和拒绝、应用操作 |
-| `docs/assets/design-results-media-zh.webp` | 中文结果区显示真实 1536×1024 图片、有效期、原图和下载操作 |
-| `docs/assets/llm-model-selector-zh.webp` | 中文 Harness 模型选择器显示实时 Modellix LLM 目录 |
-| `docs/assets/web-tools-zh.webp` | 中文 Harness 中真实完成的 Modellix Search 与 Fetch 公开文档结果 |
-
-Credential 只显示 write-only 的已配置状态。拍摄真实会话时，禁止打开 Key 编辑器、Network、HAR、Console、Credential 文件、Cookie 或请求详情。
-
-## 当前限制
-
-- Design 参数提议是受当前 Schema 约束的参数助手，不是开放式 Agent。
-- 当前没有上游取消调用，UI 不提供任务取消按钮。
-- 结果区持久化任务元数据和上游资源 URL，不持久化 API Key、prompt 或媒体副本。
-- 复杂或包含阻断性未支持约束的 Schema 会禁用提交，不会猜测参数含义。
-- LLM 只物化实时目录公开的模型；目录不可用时不会提供虚构回退模型。
-
-## 开发与校验
-
-```sh
-pnpm install --frozen-lockfile
-pnpm run verify:env
-pnpm run typecheck
-pnpm run lint
-pnpm run test
-pnpm run build
-pnpm run verify:pack
-pnpm run verify:fresh-install
-pnpm run verify:node22-install
-pnpm run verify:release:static
-```
-
-`pnpm run check` 依次执行环境、类型、lint、全量单元/契约测试、全局覆盖率硬门槛以及 Host runtime 和 Design 参数规划器的文件级回归下限；`verify:pack` 验证精确的制品白名单、双语文档、12 张按语言分离且经过真实解码、不含 metadata 的 WebP 截图、入口、Source Map 内嵌源码和敏感文件排除；`verify:fresh-install` 在临时项目中安装最终 tarball，并实际加载 Host、执行 Client factory、检查子路径 exports 和消费端类型；`verify:node22-install` 使用显式指定或 NVM 中自动发现的 Node.js `^22.19.0` 再执行 tarball runtime smoke，找不到兼容版本时失败而不是跳过。`pnpm run verify:release:static` 串联以上静态门禁与生产依赖审计。
-
-### 完整发布 Evidence 门禁
-
-真正发布使用 `pnpm run verify:release`。先把最终代码、文档和截图提交到 Git，并保持工作区 clean；然后在仓库外分别创建两份小于 32 KiB、无 Secret、绑定当前 40 位 HEAD 和当前包版本的 JSON。`completedAt` 必须是规范 UTC ISO-8601，且不得早于执行时间 72 小时。浏览器 evidence 必须包含以下全部检查：
-
-```json
-{
-  "version": 1,
-  "kind": "browser",
-  "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.1" },
-  "commit": "<current-40-character-lowercase-git-head>",
-  "completedAt": "<canonical-utc-iso-8601>",
-  "checks": {
-    "onboarding": "passed",
-    "settings": "passed",
-    "design": "passed",
-    "llm": "passed",
-    "web": "passed",
-    "401": "passed",
-    "a11y": "passed",
-    "theme": "passed",
-    "viewports": "passed"
-  }
-}
-```
-
-真实 API/Agent evidence 必须覆盖目录、参数规划、三类媒体、LLM Agent 和 Web；`billedCallsExplicitlyAuthorized` 只证明操作者明确授权了本次计费调用，不得在 evidence 中记录 Key、请求头或其他 Secret：
-
-```json
-{
-  "version": 1,
-  "kind": "api-agent",
-  "status": "passed",
-  "package": { "name": "dsh-modellix", "version": "0.1.1" },
-  "commit": "<current-40-character-lowercase-git-head>",
-  "completedAt": "<canonical-utc-iso-8601>",
-  "checks": {
-    "catalogs": "passed",
-    "planner": "passed",
-    "image": "passed",
-    "video": "passed",
-    "audio": "passed",
-    "llm-agent": "passed",
-    "web": "passed"
-  },
-  "billedCallsExplicitlyAuthorized": true
-}
-```
-
-需要用真实服务生成这份 evidence 时，先在独立 Web Profile 中完成并核对一次使用 Modellix 模型的 DSH Agent 会话；随后由验收进程直接从受控环境、文件或 Credential 提供 `MODELLIX_API_KEY`，并只设置以下非 Secret 控制项后执行 `pnpm run test:real:modellix`：
-
-```powershell
-$env:MODELLIX_ALLOW_BILLED_E2E = '1'
-$env:MODELLIX_REAL_AGENT_ATTESTED = '1'
-$env:MODELLIX_REAL_E2E_OUTPUT_DIR = 'D:\outside-repo\modellix-real-results'
-$env:MODELLIX_API_AGENT_E2E_EVIDENCE_FILE = 'D:\outside-repo\api-agent-evidence.json'
-pnpm run test:real:modellix
-```
-
-该脚本会真实读取鉴权目录和 Schema、完成参数规划，对图片、视频、音频各提交一次计费 POST，以有限只读请求轮询任务，调用真实 Web Search/Fetch，在仓库外保存媒体供独立解码检查，再生成无 Secret evidence。缺少显式计费授权或此前的 Agent 验收证明时，脚本拒绝运行；Key 既不作为命令参数传入，也不会被脚本输出。
-
-通过绝对路径提供两份文件后运行门禁；路径本身可以进入环境变量，API Key 不可以：
-
-```sh
-MODELLIX_BROWSER_EVIDENCE_FILE=/absolute/path/browser-evidence.json \
-MODELLIX_API_AGENT_E2E_EVIDENCE_FILE=/absolute/path/api-agent-evidence.json \
-pnpm run verify:release
-```
-
-Evidence 只是一份严格格式的验收证明，不执行或重试任何计费调用。任一固定检查缺失、失败或多出未知字段，文件位于仓库内、过期、版本或 commit 不匹配、工作区不 clean，门禁都会失败。
+卸载不会删除 Modellix 上游任务、外部环境变量或所有 Harness profile 数据。
 
 ## 参考资料
 
 - [Modellix 快速开始](https://docs.modellix.ai/get-started)
 - [Modellix LLM 概览](https://docs.modellix.ai/llm/overview)
-- [Modellix GPT Image 2 示例](https://www.modellix.ai/zh_CN/models/openai/gpt-image-2)
+- [Modellix 模型目录](https://www.modellix.ai/models)
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 ## 许可证

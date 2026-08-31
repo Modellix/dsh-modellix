@@ -9,11 +9,9 @@ import {
 } from "react";
 import type {
   PropsLocale,
-  PropsRuntime,
 } from "@deepseek-ai/dsh-client-ui-slots";
 import {
   Button,
-  IconRightUpOutline14,
   Input,
   Modal,
   StateDot,
@@ -45,6 +43,7 @@ import {
   type JsonParameterIssue,
 } from "./design-presentation.js";
 import { DesignResultPreview } from "./DesignResultPreview.js";
+import { handleResultTabKeyDown } from "./result-tabs.js";
 import {
   BusyStatus,
   CredentialModal,
@@ -62,15 +61,18 @@ import {
   useCredentialDialogSnapshot,
 } from "./credential-dialog.js";
 
-export type ModellixDesignProps = PropsRuntime<"conversation.view"> &
-  PropsLocale<"modellix"> & {
+export type ModellixDesignProps = PropsLocale<"modellix"> & {
+    readonly advancedEditorOpen?: boolean;
     readonly controller: DesignController;
     readonly settingsController: SettingsController;
+    readonly onAddUrl?: (url: string) => void;
   };
 
 export function ModellixDesignView({
+  advancedEditorOpen = true,
   controller,
   settingsController,
+  onAddUrl,
   t,
 }: ModellixDesignProps): ReactNode {
   const state = useResourceState(controller.store);
@@ -254,11 +256,12 @@ export function ModellixDesignView({
   return (
     <div className="mdlx-design">
       <div className="mdlx-design-shell">
-        <section className="mdlx-design-pane" aria-labelledby="mdlx-design-title">
-          <header className="mdlx-heading">
-            <h2 id="mdlx-design-title">{t("designTitle")}</h2>
-            <p className="mdlx-muted">{t("designDescription")}</p>
-          </header>
+        <div
+          id="mdlx-design-editor"
+          className="mdlx-design-editor"
+          hidden={!advancedEditorOpen}
+        >
+          <section className="mdlx-design-pane" aria-label={t("advancedEditor")}>
 
           {!snapshot.enabled && <div className="mdlx-info">{t("designDisabled")}</div>}
           {!snapshot.credentialReady && (
@@ -282,6 +285,41 @@ export function ModellixDesignView({
             <div className="mdlx-info" role="status">
               <strong>{t("notice")}: </strong>{t(designNoticeMessageKey(snapshot.notice))}
             </div>
+          )}
+
+          {draft !== null && (
+            <section className="mdlx-card" aria-labelledby="mdlx-assistant-title">
+              <div className="mdlx-heading">
+                <h3 id="mdlx-assistant-title">{t("assistantTitle")}</h3>
+              </div>
+              <textarea
+                id="mdlx-assistant-instruction"
+                className="mdlx-textarea mdlx-textarea-small"
+                value={instruction}
+                maxLength={8_000}
+                placeholder={t("assistantPlaceholder")}
+                aria-labelledby="mdlx-assistant-title"
+                disabled={interactionBusy}
+                onChange={(event) => setInstruction(event.currentTarget.value)}
+              />
+              <div className="mdlx-actions">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={interactionBusy || instruction.trim().length === 0}
+                  aria-busy={state.pending === "propose"}
+                  onClick={() => {
+                    const request = instruction.trim();
+                    if (request === "") return;
+                    void controller.propose(request, parameters).then((accepted) => {
+                      if (accepted) setInstruction("");
+                    });
+                  }}
+                >
+                  {state.pending === "propose" ? t("proposing") : t("propose")}
+                </Button>
+              </div>
+            </section>
           )}
 
           <div className="mdlx-field">
@@ -424,45 +462,6 @@ export function ModellixDesignView({
             </section>
           )}
 
-          {draft !== null && (
-            <section className="mdlx-card" aria-labelledby="mdlx-assistant-title">
-              <div className="mdlx-heading">
-                <h3 id="mdlx-assistant-title">{t("assistantTitle")}</h3>
-                <p id="mdlx-assistant-paid-notice" className="mdlx-help">
-                  {t("assistantPaidNotice")}
-                </p>
-              </div>
-              <textarea
-                id="mdlx-assistant-instruction"
-                className="mdlx-textarea mdlx-textarea-small"
-                value={instruction}
-                maxLength={8_000}
-                placeholder={t("assistantPlaceholder")}
-                aria-labelledby="mdlx-assistant-title"
-                aria-describedby="mdlx-assistant-paid-notice"
-                disabled={interactionBusy}
-                onChange={(event) => setInstruction(event.currentTarget.value)}
-              />
-              <div className="mdlx-actions">
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={interactionBusy || instruction.trim().length === 0}
-                  aria-busy={state.pending === "propose"}
-                  onClick={() => {
-                    const request = instruction.trim();
-                    if (request === "") return;
-                    void controller.propose(request, parameters).then((accepted) => {
-                      if (accepted) setInstruction("");
-                    });
-                  }}
-                >
-                  {state.pending === "propose" ? t("proposing") : t("propose")}
-                </Button>
-              </div>
-            </section>
-          )}
-
           {snapshot.proposal !== null && (
             <ProposalCard
               snapshot={snapshot}
@@ -474,7 +473,6 @@ export function ModellixDesignView({
 
           {draft !== null && (
             <div className="mdlx-generate-block">
-              <p className="mdlx-help">{t("paidNotice")}</p>
               {missingRequired && (
                 <p className="mdlx-error">{t("requiredMissing")}</p>
               )}
@@ -507,13 +505,14 @@ export function ModellixDesignView({
           <div className="mdlx-live" role="status" aria-live="polite">
             {outcomeAnnouncement}
           </div>
-        </section>
-
+          </section>
+        </div>
         <DesignResults
           snapshot={snapshot}
           dateLocale={t("dateLocale")}
           dialogCoordinator={credentialDialogs}
           dialog={credentialDialog}
+          {...(onAddUrl === undefined ? {} : { onAddUrl })}
           t={t}
         />
       </div>
@@ -851,76 +850,53 @@ function DesignResults({
   dateLocale,
   dialogCoordinator,
   dialog,
+  onAddUrl,
   t,
 }: {
   snapshot: DesignSnapshotWire;
   dateLocale: string;
   dialogCoordinator: CredentialDialogCoordinator;
   dialog: CredentialDialogSnapshot;
+  onAddUrl?: (url: string) => void;
   t: ModellixTranslate;
 }): ReactNode {
-  const groups = useMemo(() => {
-    const running: DesignJobWire[] = [];
-    const succeeded: DesignJobWire[] = [];
-    const diagnostics: DesignJobWire[] = [];
-    for (const job of snapshot.jobs) {
-      if (job.status === "running") running.push(job);
-      else if (job.status === "succeeded") succeeded.push(job);
-      else diagnostics.push(job);
-    }
-    return { running, succeeded, diagnostics };
-  }, [snapshot.jobs]);
+  const [open, setOpen] = useState(true);
+  const jobs = useMemo(
+    () => [...snapshot.jobs].sort((left, right) =>
+      Date.parse(right.createdAt) - Date.parse(left.createdAt)),
+    [snapshot.jobs],
+  );
   const empty = snapshot.jobs.length === 0;
   return (
-    <section className="mdlx-design-pane" aria-labelledby="mdlx-results-title">
-      <header className="mdlx-heading">
-        <h2 id="mdlx-results-title">{t("resultsTitle")}</h2>
-      </header>
-      {empty ? (
-        <div className="mdlx-empty">{t("noResults")}</div>
-      ) : (
-        <div className="mdlx-design-scroll">
-          <ResultSection title={t("runningTitle")} jobs={groups.running} dateLocale={dateLocale} dialogCoordinator={dialogCoordinator} dialog={dialog} t={t} />
-          <ResultSection title={t("succeededTitle")} jobs={groups.succeeded} dateLocale={dateLocale} dialogCoordinator={dialogCoordinator} dialog={dialog} t={t} />
-          <ResultSection title={t("diagnosticsTitle")} jobs={groups.diagnostics} dateLocale={dateLocale} dialogCoordinator={dialogCoordinator} dialog={dialog} t={t} />
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ResultSection({
-  title,
-  jobs,
-  dateLocale,
-  dialogCoordinator,
-  dialog,
-  t,
-}: {
-  title: string;
-  jobs: readonly DesignJobWire[];
-  dateLocale: string;
-  dialogCoordinator: CredentialDialogCoordinator;
-  dialog: CredentialDialogSnapshot;
-  t: ModellixTranslate;
-}): ReactNode {
-  if (jobs.length === 0) return null;
-  return (
-    <section className="mdlx-result-section">
-      <h3>{title}</h3>
-      <ul className="mdlx-result-list">
-        {jobs.map((job) => (
-          <ResultCard
-            key={job.jobId}
-            job={job}
-            dateLocale={dateLocale}
-            dialogCoordinator={dialogCoordinator}
-            dialog={dialog}
-            t={t}
-          />
-        ))}
-      </ul>
-    </section>
+    <details
+      className="mdlx-design-pane mdlx-results-disclosure"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="mdlx-results-summary">
+        <span id="mdlx-results-title">{t("resultsTitle")}</span>
+        <span className="mdlx-muted">{t("resultsCount", { count: jobs.length })}</span>
+      </summary>
+      <div className="mdlx-results-body">
+        {empty ? (
+          <div className="mdlx-empty">{t("noResults")}</div>
+        ) : (
+          <ul className="mdlx-result-list">
+            {jobs.map((job) => (
+              <ResultCard
+                key={job.jobId}
+                job={job}
+                dateLocale={dateLocale}
+                dialogCoordinator={dialogCoordinator}
+                dialog={dialog}
+                {...(onAddUrl === undefined ? {} : { onAddUrl })}
+                t={t}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -929,14 +905,20 @@ function ResultCard({
   dateLocale,
   dialogCoordinator,
   dialog,
+  onAddUrl,
   t,
 }: {
   job: DesignJobWire;
   dateLocale: string;
   dialogCoordinator: CredentialDialogCoordinator;
   dialog: CredentialDialogSnapshot;
+  onAddUrl?: (url: string) => void;
   t: ModellixTranslate;
 }): ReactNode {
+  const [open, setOpen] = useState(true);
+  const [tab, setTab] = useState<"preview" | "json">("preview");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const tabId = useId();
   const status = jobStatus(job.status, t);
   const created = formatTime(job.createdAt, dateLocale);
   const dot: StateDotState =
@@ -947,37 +929,113 @@ function ResultCard({
         : job.status === "failed"
           ? "error"
           : "warning";
+  const resources = job.status === "expired" ? [] : job.resources;
+  const succeeded = job.status === "succeeded";
+  const resourceIndex = resources.length === 0 ? 0 : activeIndex % resources.length;
+  const currentResource = resources[resourceIndex];
+  const activeTabId = `${tabId}-${tab}-tab`;
+  const activePanelId = `${tabId}-${tab}-panel`;
   return (
     <li className="mdlx-result-card">
-      <div className="mdlx-result-head">
-        <div className="mdlx-status-copy">
-          <StateDot state={dot} />
-          <strong>{status}</strong>
+      <details
+        className="mdlx-result-disclosure"
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
+        <summary className="mdlx-result-card-summary">
+          <div className="mdlx-result-head">
+            <div className="mdlx-status-copy">
+              <StateDot state={dot} />
+              <strong>{status}</strong>
+            </div>
+            <span className="mdlx-muted">{t("jobCreated", { time: created })}</span>
+          </div>
+          <span className="mdlx-muted">{t("jobModel", { model: job.modelId })}</span>
+        </summary>
+        <div className="mdlx-result-card-body">
+          {succeeded && (<>
+            <div
+              className="mdlx-result-tabs"
+              role="tablist"
+              aria-label={t("resultViewLabel")}
+              onKeyDown={handleResultTabKeyDown}
+            >
+            <button
+              id={`${tabId}-preview-tab`}
+              type="button"
+              role="tab"
+              aria-controls={`${tabId}-preview-panel`}
+              aria-selected={tab === "preview"}
+              tabIndex={tab === "preview" ? 0 : -1}
+              className="mdlx-result-tab"
+              onClick={() => setTab("preview")}
+            >
+              {t("previewTab")}
+            </button>
+            <button
+              id={`${tabId}-json-tab`}
+              type="button"
+              role="tab"
+              aria-controls={`${tabId}-json-panel`}
+              aria-selected={tab === "json"}
+              tabIndex={tab === "json" ? 0 : -1}
+              className="mdlx-result-tab"
+              onClick={() => setTab("json")}
+            >
+              {t("jsonTab")}
+            </button>
+            </div>
+            {tab === "preview" ? (
+            <div id={activePanelId} role="tabpanel" aria-labelledby={activeTabId} className="mdlx-result-panel">
+              {currentResource === undefined ? (
+                <div className="mdlx-empty mdlx-empty-compact">{t("noPreview")}</div>
+              ) : (
+                <>
+                  <ResultResource
+                    resource={currentResource}
+                    dateLocale={dateLocale}
+                    dialogCoordinator={dialogCoordinator}
+                    dialog={dialog}
+                    {...(onAddUrl === undefined ? {} : { onAddUrl })}
+                    t={t}
+                  />
+                  {resources.length > 1 && (
+                    <div className="mdlx-resource-nav" aria-label={t("resourceNavigation")}>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setActiveIndex((resourceIndex - 1 + resources.length) % resources.length)}
+                      >
+                        {t("previousResource")}
+                      </Button>
+                      <span className="mdlx-muted">
+                        {t("resourcePosition", { current: resourceIndex + 1, total: resources.length })}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setActiveIndex((resourceIndex + 1) % resources.length)}
+                      >
+                        {t("nextResource")}
+                      </Button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            ) : (
+              <pre id={activePanelId} role="tabpanel" aria-labelledby={activeTabId} className="mdlx-result-json">{JSON.stringify(job, null, 2)}</pre>
+            )}
+          </>)}
+          {job.diagnostic !== null && (
+            <div className="mdlx-error">
+              <strong className="mdlx-code">{job.diagnostic.code}</strong>
+              <p>{t(designDiagnosticMessageKey(job.diagnostic.code))}</p>
+              {job.diagnostic.retryable && <p>{t("diagnosticRetryable")}</p>}
+            </div>
+          )}
         </div>
-        <span className="mdlx-muted">{t("jobCreated", { time: created })}</span>
-      </div>
-      <span className="mdlx-muted">{t("jobModel", { model: job.modelId })}</span>
-      {job.resources.length > 0 && job.status !== "expired" && (
-        <div className="mdlx-resource-list">
-          {job.resources.map((resource) => (
-            <ResultResource
-              key={resource.id}
-              resource={resource}
-              dateLocale={dateLocale}
-              dialogCoordinator={dialogCoordinator}
-              dialog={dialog}
-              t={t}
-            />
-          ))}
-        </div>
-      )}
-      {job.diagnostic !== null && (
-        <div className="mdlx-error">
-          <strong className="mdlx-code">{job.diagnostic.code}</strong>
-          <p>{t(designDiagnosticMessageKey(job.diagnostic.code))}</p>
-          {job.diagnostic.retryable && <p>{t("diagnosticRetryable")}</p>}
-        </div>
-      )}
+      </details>
     </li>
   );
 }
@@ -987,12 +1045,14 @@ function ResultResource({
   dateLocale,
   dialogCoordinator,
   dialog,
+  onAddUrl,
   t,
 }: {
   resource: DesignResourceWire;
   dateLocale: string;
   dialogCoordinator: CredentialDialogCoordinator;
   dialog: CredentialDialogSnapshot;
+  onAddUrl?: (url: string) => void;
   t: ModellixTranslate;
 }): ReactNode {
   const imageDialogOwner = `design-image:${useId()}`;
@@ -1017,16 +1077,23 @@ function ResultResource({
   return (
     <>
       <article className="mdlx-resource">
-      <DesignResultPreview resource={resource} t={t} />
+      {resource.kind === "image" ? (
+        <button
+          type="button"
+          className="mdlx-image-preview-button"
+          aria-label={t("openImage")}
+          onClick={() => dialogCoordinator.open(imageDialogOwner)}
+        >
+          <DesignResultPreview resource={resource} t={t} />
+        </button>
+      ) : (
+        <DesignResultPreview resource={resource} t={t} />
+      )}
       <div className="mdlx-actions mdlx-actions-start">
-        {resource.kind === "image" && (
-          <button
-            type="button"
-            className="mdlx-safe-link mdlx-link-button"
-            onClick={() => dialogCoordinator.open(imageDialogOwner)}
-          >
-            {t("openImage")}
-          </button>
+        {onAddUrl !== undefined && (
+          <Button type="button" variant="outline" onClick={() => onAddUrl(resource.url)}>
+            {t("addUrlToChat")}
+          </Button>
         )}
         <a
           className="mdlx-safe-link"
@@ -1036,7 +1103,7 @@ function ResultResource({
           referrerPolicy="no-referrer"
           download
         >
-          {t("download")} <IconRightUpOutline14 size={14} />
+          {t("download")}
         </a>
       </div>
       {resource.expiresAt !== null && (
@@ -1086,7 +1153,7 @@ function ResultResource({
                 referrerPolicy="no-referrer"
                 download
               >
-                {t("download")} <IconRightUpOutline14 size={14} />
+                {t("download")}
               </a>
             </div>
           </div>

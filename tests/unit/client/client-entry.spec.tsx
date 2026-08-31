@@ -5,7 +5,8 @@ const MODULES = [
   "../../../src/client/rpc.js",
   "../../../src/client/styles.js",
   "../../../src/client/CredentialRecoveryOverlay.js",
-  "../../../src/client/DesignView.js",
+  "../../../src/client/DesignDrawer.js",
+  "../../../src/client/MediaToolView.js",
   "../../../src/client/Onboarding.js",
   "../../../src/client/SettingsSection.js",
 ] as const;
@@ -16,11 +17,13 @@ afterEach(() => {
 });
 
 describe("Modellix Client entry point", () => {
-  it("registers dictionaries, styles, and the four public slot contributions", async () => {
+  it("registers dictionaries, styles, the Design drawer, and media result views", async () => {
     const styleDispose = vi.fn();
     const installStyles = vi.fn(() => styleDispose);
     const overlay = vi.fn(() => null);
-    const designView = vi.fn(() => null);
+    const designDrawer = vi.fn(() => null);
+    const designLauncher = vi.fn(() => null);
+    const mediaToolView = vi.fn(() => null);
     const onboarding = vi.fn(() => null);
     const settingsSection = vi.fn(() => null);
 
@@ -34,6 +37,12 @@ describe("Modellix Client entry point", () => {
       constructor(
         readonly rpc: TestRpcClient,
         readonly sessionId: string,
+      ) {}
+    }
+    class TestDesignDrawerController {
+      constructor(
+        readonly rpc: TestRpcClient,
+        readonly layout: unknown,
       ) {}
     }
 
@@ -50,8 +59,13 @@ describe("Modellix Client entry point", () => {
     vi.doMock("../../../src/client/CredentialRecoveryOverlay.js", () => ({
       CredentialRecoveryOverlay: overlay,
     }));
-    vi.doMock("../../../src/client/DesignView.js", () => ({
-      ModellixDesignView: designView,
+    vi.doMock("../../../src/client/DesignDrawer.js", () => ({
+      DesignDrawerController: TestDesignDrawerController,
+      ModellixDesignDrawer: designDrawer,
+      ModellixDesignLauncher: designLauncher,
+    }));
+    vi.doMock("../../../src/client/MediaToolView.js", () => ({
+      ModellixMediaToolView: mediaToolView,
     }));
     vi.doMock("../../../src/client/Onboarding.js", () => ({
       ModellixOnboarding: onboarding,
@@ -74,6 +88,7 @@ describe("Modellix Client entry point", () => {
     const translate = vi.fn((key: string) => `translated:${key}`);
     const bind = vi.fn((_namespace: string) => translate);
     const transport = { request: vi.fn() };
+    const layout = { openDetails: vi.fn(), closeDetails: vi.fn() };
     const register = vi.fn(
       (metadata: Record<string, unknown>, component: unknown) => {
         registrations.push({ metadata, component });
@@ -82,6 +97,7 @@ describe("Modellix Client entry point", () => {
     );
     const context = {
       connection: { rpc: transport },
+      layout,
       effect: vi.fn((factory: () => unknown, label: string) => {
         effects.push({ label, cleanup: factory() });
       }),
@@ -97,7 +113,7 @@ describe("Modellix Client entry point", () => {
 
     apply(context as never);
 
-    expect(inject).toEqual(["slots", "locale", "connection"]);
+    expect(inject).toEqual(["slots", "locale", "connection", "layout"]);
     expect(localeRegister).toHaveBeenCalledOnce();
     expect(localeRegister.mock.calls[0]?.[0]).toBe("modellix");
     expect(localeRegister.mock.calls[0]?.[1]).toEqual({
@@ -112,69 +128,102 @@ describe("Modellix Client entry point", () => {
     ]);
     expect(slotDependencies).toEqual([
       "shell.overlay",
+      "shell.overlay",
       "settings.onboarding",
       "settings.section",
-      "conversation.view",
+      "conversation.session.header.utilities",
+      "tool.call.toolview",
+      "tool.call.toolview",
     ]);
     expect(registrations.map(({ metadata, component }) => ({
       id: metadata.id,
       name: metadata.name,
       order: metadata.order,
+      priority: metadata.priority,
       component,
     }))).toEqual([
       {
         id: "modellix.credential-recovery",
         name: "shell.overlay",
         order: 10,
+        priority: undefined,
         component: overlay,
+      },
+      {
+        id: "modellix.design-drawer",
+        name: "shell.overlay",
+        order: 20,
+        priority: undefined,
+        component: designDrawer,
       },
       {
         id: "modellix.onboarding",
         name: "settings.onboarding",
         order: 10,
+        priority: undefined,
         component: onboarding,
       },
       {
         id: "modellix",
         name: "settings.section",
         order: 30,
+        priority: undefined,
         component: settingsSection,
       },
       {
-        id: "modellix.design",
-        name: "conversation.view",
+        id: "modellix.design-launcher",
+        name: "conversation.session.header.utilities",
         order: 20,
-        component: designView,
+        priority: undefined,
+        component: designLauncher,
+      },
+      {
+        id: undefined,
+        name: "tool.call.toolview",
+        order: undefined,
+        priority: 20,
+        component: mediaToolView,
+      },
+      {
+        id: undefined,
+        name: "tool.call.toolview",
+        order: undefined,
+        priority: 20,
+        component: mediaToolView,
       },
     ]);
 
     const overlayProps = registrations[0]?.metadata.inject as (() => {
       readonly controller: TestSettingsController;
     });
-    const onboardingProps = registrations[1]?.metadata.inject as (() => {
-      readonly controller: TestSettingsController;
-    });
-    const settingsProps = registrations[2]?.metadata.inject as (() => {
-      readonly controller: TestSettingsController;
-    });
-    const designProps = registrations[3]?.metadata.inject as ((sessionId: string) => {
-      readonly controller: TestDesignController;
+    const drawerProps = registrations[1]?.metadata.inject as (() => {
+      readonly drawer: TestDesignDrawerController;
       readonly settingsController: TestSettingsController;
+    });
+    const onboardingProps = registrations[2]?.metadata.inject as (() => {
+      readonly controller: TestSettingsController;
+    });
+    const settingsProps = registrations[3]?.metadata.inject as (() => {
+      readonly controller: TestSettingsController;
+    });
+    const launcherProps = registrations[4]?.metadata.inject as (() => {
+      readonly drawer: TestDesignDrawerController;
     });
     const sharedSettings = overlayProps().controller;
 
+    const drawer = drawerProps().drawer;
+    expect(drawerProps().settingsController).toBe(sharedSettings);
     expect(onboardingProps().controller).toBe(sharedSettings);
     expect(settingsProps().controller).toBe(sharedSettings);
     expect(sharedSettings.rpc).toBeInstanceOf(TestRpcClient);
     expect(sharedSettings.rpc.transport).toBe(transport);
-    const conversation = designProps("session-entry-test");
-    expect(conversation.settingsController).toBe(sharedSettings);
-    expect(conversation.controller.rpc).toBe(sharedSettings.rpc);
-    expect(conversation.controller.sessionId).toBe("session-entry-test");
+    expect(drawer.rpc).toBe(sharedSettings.rpc);
+    expect(drawer.layout).toBe(layout);
+    expect(launcherProps().drawer).toBe(drawer);
 
-    const settingsLabel = registrations[2]?.metadata.label as (() => string);
-    const designLabel = registrations[3]?.metadata.label as (() => string);
+    const settingsLabel = registrations[3]?.metadata.label as (() => string);
     expect(settingsLabel()).toBe("translated:nav");
-    expect(designLabel()).toBe("translated:designTab");
+    expect(registrations[5]?.metadata.key).toBe("modellix_media_generate");
+    expect(registrations[6]?.metadata.key).toBe("modellix_media_get_result");
   });
 });

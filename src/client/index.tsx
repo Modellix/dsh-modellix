@@ -3,17 +3,24 @@ import type {} from "@deepseek-ai/dsh-client-connection/client";
 import type {} from "@deepseek-ai/dsh-client-locale/client";
 import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
+import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
+import type {} from "@deepseek-ai/dsh-client-ui-tool/client";
 
-import { DesignController, SettingsController } from "./store.js";
+import { SettingsController } from "./store.js";
 import { CredentialRecoveryOverlay } from "./CredentialRecoveryOverlay.js";
-import { ModellixDesignView } from "./DesignView.js";
+import {
+  DesignDrawerController,
+  ModellixDesignDrawer,
+  ModellixDesignLauncher,
+} from "./DesignDrawer.js";
+import { ModellixMediaToolView } from "./MediaToolView.js";
 import { en, MODELLIX_LOCALE_NAMESPACE, zh } from "./locales.js";
 import { ModellixOnboarding } from "./Onboarding.js";
 import { ModellixRpcClient } from "./rpc.js";
 import { ModellixSettingsSection } from "./SettingsSection.js";
 import { installModellixClientStyles } from "./styles.js";
 
-export const inject = ["slots", "locale", "connection"];
+export const inject = ["slots", "locale", "connection", "layout"];
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(
@@ -32,6 +39,7 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(MODELLIX_LOCALE_NAMESPACE);
   const rpc = new ModellixRpcClient(ctx.connection.rpc);
   const settingsController = new SettingsController(rpc);
+  const designDrawer = new DesignDrawerController(rpc, ctx.layout);
 
   ctx.slots.inject("shell.overlay", () =>
     ctx.slots.register(
@@ -43,6 +51,19 @@ export function apply(ctx: ClientContext): void {
         inject: () => ({ controller: settingsController }),
       },
       CredentialRecoveryOverlay,
+    ),
+  );
+
+  ctx.slots.inject("shell.overlay", () =>
+    ctx.slots.register(
+      {
+        name: "shell.overlay",
+        id: "modellix.design-drawer",
+        order: 20,
+        locale: MODELLIX_LOCALE_NAMESPACE,
+        inject: () => ({ drawer: designDrawer, settingsController }),
+      },
+      ModellixDesignDrawer,
     ),
   );
 
@@ -73,20 +94,43 @@ export function apply(ctx: ClientContext): void {
     ),
   );
 
-  ctx.slots.inject("conversation.view", () =>
+  ctx.slots.inject("conversation.session.header.utilities", () =>
     ctx.slots.register(
       {
-        name: "conversation.view",
-        id: "modellix.design",
+        name: "conversation.session.header.utilities",
+        id: "modellix.design-launcher",
         order: 20,
-        label: () => t("designTab"),
         locale: MODELLIX_LOCALE_NAMESPACE,
-        inject: (sessionId) => ({
-          controller: new DesignController(rpc, sessionId),
-          settingsController,
-        }),
+        inject: () => ({ drawer: designDrawer }),
       },
-      ModellixDesignView,
+      ModellixDesignLauncher,
+    ),
+  );
+
+
+  ctx.slots.inject("tool.call.toolview", () =>
+    ctx.slots.register(
+      {
+        name: "tool.call.toolview",
+        key: "modellix_media_generate",
+        priority: 20,
+        locale: MODELLIX_LOCALE_NAMESPACE,
+        inject: () => ({ drawer: designDrawer }),
+      },
+      ModellixMediaToolView,
+    ),
+  );
+
+  ctx.slots.inject("tool.call.toolview", () =>
+    ctx.slots.register(
+      {
+        name: "tool.call.toolview",
+        key: "modellix_media_get_result",
+        priority: 20,
+        locale: MODELLIX_LOCALE_NAMESPACE,
+        inject: () => ({ drawer: designDrawer }),
+      },
+      ModellixMediaToolView,
     ),
   );
 }

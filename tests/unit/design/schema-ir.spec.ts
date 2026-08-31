@@ -202,6 +202,37 @@ describe("parseDesignSchema", () => {
     expect(ir.primaryPromptPath).toBe("/prompt");
   });
 
+  it("accepts the linear Modellix width*height pattern used by image models", () => {
+    const ir = parseDesignSchema({
+      servers: [{ url: "https://api.modellix.ai/api/v1/alibaba/qwen-image-3.0-pro" }],
+      post: {
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["prompt"],
+                properties: {
+                  prompt: { type: "string" },
+                  size: {
+                    type: "string",
+                    pattern: "^\\d+\\*\\d+$",
+                    example: "1024*1024",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(ir.supported).toBe(true);
+    expect(ir.diagnostics).toEqual([]);
+    expect(ir.fields.find((field) => field.key === "size")?.constraints.pattern)
+      .toBe("^\\d+\\*\\d+$");
+  });
+
   it("decodes RFC 6901 references and merges allOf constraints", () => {
     const ir = parseDesignSchema({
       $defs: {

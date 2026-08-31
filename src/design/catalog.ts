@@ -30,6 +30,8 @@ export interface DesignModelSummary {
   readonly slug: string;
   readonly displayName: string;
   readonly categories: readonly DesignMediaCategory[];
+  /** Live catalog routing capability, for example text-to-image or image-to-video. */
+  readonly taskType?: string;
   readonly description?: string;
   readonly thumbnailUrl?: string;
 }
@@ -288,13 +290,15 @@ function parseModel(
     return null;
   }
 
+  const rawTaskType = item.task_type ?? item.taskType ?? item.type;
   const categories = parseCategories(
-    item.categories ?? item.category ?? item.task_type ?? item.type,
+    item.categories ?? item.category ?? rawTaskType,
     requestedCategory,
   );
   const displayName =
     stringValue(item.display_name ?? item.displayName ?? item.title) ?? modelId;
   const description = stringValue(item.description ?? item.summary);
+  const taskType = routingType(rawTaskType);
   const thumbnailUrl = safeHttpsUrl(
     item.thumbnail_url ?? item.thumbnailUrl ?? item.cover_url ?? item.cover,
   );
@@ -305,9 +309,18 @@ function parseModel(
     slug: `${resolvedProvider}/${modelId}`,
     displayName,
     categories,
+    ...(taskType === null ? {} : { taskType }),
     ...(description === null ? {} : { description }),
     ...(thumbnailUrl === null ? {} : { thumbnailUrl }),
   };
+}
+
+function routingType(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return /^[a-z0-9]+(?:-[a-z0-9]+){0,7}$/u.test(normalized)
+    ? normalized.slice(0, 64)
+    : null;
 }
 
 function parseCategories(

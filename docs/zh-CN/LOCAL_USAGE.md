@@ -42,7 +42,7 @@ pnpm run verify:pack
 pnpm pack
 ```
 
-完成后，仓库根目录会生成类似 `dsh-modellix-0.1.1.tgz` 的文件。不要直接把未构建的 TypeScript 源码交给 DSH 安装。
+完成后，仓库根目录会生成类似 `dsh-modellix-0.2.0.tgz` 的文件。不要直接把未构建的 TypeScript 源码交给 DSH 安装。
 
 ## 3. 创建独立的本地 Harness 环境
 
@@ -60,7 +60,7 @@ New-Item -ItemType Directory -Force -Path $env:DSH_HOME | Out-Null
 把刚生成的 tarball 安装到 `web` Profile：
 
 ```powershell
-dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
 dsh --profile web --dump-config
 ```
 
@@ -99,17 +99,17 @@ dsh --profile web --no-open
 2. 检查 Design、LLM、Web 三个开关；首次安装默认全部开启。
 3. 选择“保存并启用”。
 
-## 7. 使用 Design
+## 7. 使用 Chat-first 媒体创作
 
-1. 打开会话顶部的 **Design** 标签。
-2. 搜索或按图片、视频、音频筛选模型。
-3. 选择模型并输入 prompt。很多模型只需要 prompt，其余字段会按实时 Schema 填入默认值。
-4. 需要精准控制时，直接修改页面列出的尺寸、质量、时长、比例等参数。
-5. 也可以在“用对话调整参数”中描述修改，检查提议差异后再应用。该步骤可能产生 LLM 用量，但不会自动提交媒体生成。
-6. 检查参数和计费提示，只点击一次“确认并生成”。
-7. 在右侧结果区查看进行中、已完成和诊断记录；完成后可预览或下载媒体。
+1. 打开会话，直接描述所需图片、视频、编辑、转换或语音，不必写工具名。
+2. Agent 按需查询实时目录并读取模型 Schema。
+3. 需求基于上一项结果时，Agent 复用最新相关 URL，并选择编辑、图生视频或视频编辑模型。
+4. Agent 只提交一次，并在该回合最多查询一次。
+5. 在对话中查看实时卡片；后台任务完成后卡片原位更新，不应出现第二张结果卡。
+6. 点击会话头部最右侧 **Modellix Design**，查看当前会话全部结果。
+7. 成功卡可用预览/JSON、图片放大、原生视频/音频播放器、**添加 URL 到对话框** 和 **下载**。
 
-生成请求可能计费。插件不会自动重试计费 POST；若页面提示“提交结果未知”，应先检查结果列表或 Modellix 侧记录，不要立即重复提交。
+高级精准参数编辑器继续保留，但 `0.2.0` 暂不显示入口。常规 UI 不显示付费提示；消耗与明细在 Modellix 查看。
 
 ## 8. 使用 Modellix LLM
 
@@ -119,9 +119,9 @@ dsh --profile web --no-open
 
 目录来自 Modellix 实时接口；目录不可用时，插件不会显示虚构的备用模型。
 
-## 9. 使用 Web Search/Fetch
+## 9. 使用自动 Web Search/Fetch
 
-确认 Web 开关开启后，在对话中明确要求 Agent 搜索公开网页并读取需要的结果。Harness 原生 `web_search` 和 `web_fetch` 会使用 Modellix Provider，页面不会出现一套重复的自定义工具。
+确认 Web 开关开启后，正常提出实时、外部、URL 或来源核验问题。Agent 会按需自动使用明确的 `modellix_web_search` 与 `modellix_web_fetch`，用户不需要说出工具名。
 
 ## 10. 更新本地插件
 
@@ -135,7 +135,7 @@ dsh --profile web --no-open
 Set-Location 'D:\work\maas\githup\dsh-modellix'
 pnpm run verify:pack
 pnpm pack
-dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
 dsh --profile web --dump-config
 dsh --profile web --no-open
 ```
@@ -146,7 +146,9 @@ dsh --profile web --no-open
 | --- | --- |
 | 先出现 DeepSeek API Key 弹窗 | 这是全新 Harness Profile 的基础初始化，不是 Modellix 弹窗；完成后继续配置 Modellix |
 | `modellix-cli` 已登录但插件仍要求 Key | CLI Keychain 与 Harness Credential 相互独立；在插件 UI 保存，或给 Harness 启动进程设置 `MODELLIX_API_KEY` |
-| 安装后看不到 Design 标签 | 检查 `--dump-config`，确认安装到正在运行的 Profile，并完整重启该 Profile |
+| 看不到 Modellix Design | 检查 `--dump-config`、确认 Design 已开启，并在更新后完整重启运行中的 Profile |
+| 助手正文里的状态看起来旧 | 当前状态属于实时卡片与右侧面板；`0.2.0` 后台更新卡片，并避免在普通正文写非终态 |
+| 一个任务显示两张卡 | `0.2.0` 不应出现；在不包含 Secret 的情况下记录 job/tool call id 并报告重复卡缺陷 |
 | 页面提示 Key 无效 | 只有 Modellix 明确返回 401 才会进入该状态；本地 Credential 可在设置中更换，环境来源需在外部更新并重启 |
 | 余额不足 | 402 不会被误报为 Key 无效；充值或调整任务后手动重试 |
 | 请求过多 | 等待 429 限流窗口结束后再手动重试 |

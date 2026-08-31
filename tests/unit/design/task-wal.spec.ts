@@ -19,10 +19,11 @@ describe("DesignTaskRepository", () => {
       clock: { now: () => now },
     });
 
-    await repository.recordSubmitIntent("request-1", "openai/gpt-image-2", 3);
+    await repository.recordSubmitIntent("request-1", "openai/gpt-image-2", "session-1", 3);
     expect(await repository.listTasks()).toEqual([
       expect.objectContaining({
         requestId: "request-1",
+        sessionId: "session-1",
         credentialEpoch: 3,
         taskId: null,
         state: "submitting",
@@ -67,7 +68,7 @@ describe("DesignTaskRepository", () => {
   it("records an ambiguous POST as submit-unknown without duplicating it", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-2", "openai/gpt-image-2", 4);
+    await repository.recordSubmitIntent("request-2", "openai/gpt-image-2", "session-1", 4);
     await repository.markSubmitUnknown("request-2");
     expect(await repository.listTasks()).toEqual([
       expect.objectContaining({ state: "submit-unknown", taskId: null }),
@@ -80,7 +81,7 @@ describe("DesignTaskRepository", () => {
   it("closes a definitively rejected submit intent without making it retryable", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-rejected", "openai/gpt-image-2", 5);
+    await repository.recordSubmitIntent("request-rejected", "openai/gpt-image-2", "session-1", 5);
     await repository.markSubmitRejected("request-rejected");
 
     expect(await repository.listTasks()).toEqual([
@@ -94,7 +95,7 @@ describe("DesignTaskRepository", () => {
   it("stores a closed WAL shape that has no prompt or API-key fields", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-3", "openai/gpt-image-2", 6);
+    await repository.recordSubmitIntent("request-3", "openai/gpt-image-2", "session-1", 6);
     const serialized = [...memory.values.values()].join("");
     expect(serialized).not.toContain("prompt");
     expect(serialized).not.toContain("apiKey");
@@ -104,7 +105,7 @@ describe("DesignTaskRepository", () => {
   it("does not append an unchanged polling observation", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-stable", "openai/gpt-image-2", 7);
+    await repository.recordSubmitIntent("request-stable", "openai/gpt-image-2", "session-1", 7);
     await repository.recordSubmitAccepted("request-stable", task("task-stable", "running"));
     const writesBeforePoll = memory.writeCount();
 
@@ -116,7 +117,7 @@ describe("DesignTaskRepository", () => {
   it("replays a persisted poll failure and clears it after a successful observation", async () => {
     const memory = memoryStorage();
     const repository = new DesignTaskRepository({ storage: memory.storage });
-    await repository.recordSubmitIntent("request-poll-failure", "openai/gpt-image-2", 9);
+    await repository.recordSubmitIntent("request-poll-failure", "openai/gpt-image-2", "session-1", 9);
     await repository.recordSubmitAccepted(
       "request-poll-failure",
       task("task-poll-failure", "running"),
@@ -199,7 +200,7 @@ describe("DesignTaskRepository", () => {
       clock: { now: () => now },
       maxEvents: 2,
     });
-    await repository.recordSubmitIntent("request-compact", "openai/gpt-image-2", 8);
+    await repository.recordSubmitIntent("request-compact", "openai/gpt-image-2", "session-1", 8);
     await repository.recordSubmitAccepted("request-compact", task("task-compact", "queued"));
     now = 2_000;
 
@@ -280,6 +281,7 @@ describe("selectAvailableResults", () => {
       {
         requestId: "request-a",
         modelSlug: "openai/gpt-image-2",
+        sessionId: "session-a",
         credentialEpoch: 1,
         taskId: "task-a",
         state: "succeeded" as const,
@@ -309,6 +311,7 @@ describe("selectAvailableResults", () => {
       {
         requestId: "request-b",
         modelSlug: "acme/audio",
+        sessionId: "session-b",
         credentialEpoch: 1,
         taskId: "task-b",
         state: "succeeded" as const,

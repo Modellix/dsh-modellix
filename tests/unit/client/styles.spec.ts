@@ -58,10 +58,10 @@ describe("Modellix Client styles", () => {
     )?.groups?.rules;
 
     expect(coarsePointer).toContain(
-      ".mdlx-settings button,.mdlx-design button,.mdlx-modal-content button{min-height:48px}",
+      ".mdlx-settings button,.mdlx-design button,.mdlx-design-drawer button,.mdlx-tool-result button,.mdlx-modal-content button{min-height:48px}",
     );
     expect(coarsePointer).not.toContain(
-      ".mdlx-settings button,.mdlx-design button,.mdlx-modal-content button{min-width:48px",
+      ".mdlx-settings button,.mdlx-design button,.mdlx-design-drawer button,.mdlx-tool-result button,.mdlx-modal-content button{min-width:48px",
     );
     expect(coarsePointer).toContain(
       ".mdlx-input,.mdlx-select,.mdlx-native-input,.mdlx-advanced>summary{min-height:48px}",
@@ -111,6 +111,46 @@ describe("Modellix Client styles", () => {
       ".mdlx-modal-content>.mdlx-heading{margin-bottom:0}",
     );
     expect(MODELLIX_CLIENT_CSS).toContain("@container (max-width:992px)");
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-design-launcher{height:32px!important;min-height:32px!important;padding:6px 12px!important;border-radius:18px!important;font-size:13px!important;font-weight:400!important;line-height:20px!important}",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      "@media (pointer:coarse){.mdlx-design-launcher{height:48px!important;min-height:48px!important}",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-design-drawer-viewport{position:fixed;inset:0 0 0 auto;width:360px;max-width:100vw;overflow:hidden;pointer-events:none}",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-design-drawer{position:absolute;inset:0 0 0 auto;width:360px;min-width:360px",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-drawer-close{position:absolute!important;inset-block-start:12px;inset-inline-end:12px;width:36px!important;min-width:36px!important;height:36px!important;min-height:36px!important",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      '.mdlx-design-drawer-viewport[data-closing="true"] .mdlx-design-drawer{transform:translateX(100%);opacity:.72;pointer-events:none}',
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      "@media (min-width:1280px){.mdlx-design-drawer{box-shadow:none}}",
+    );
+    expect(MODELLIX_CLIENT_CSS).not.toContain("width:520px");
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      '.mdlx-drawer-header[data-editor-open="true"] .mdlx-drawer-header-reveal{grid-template-rows:1fr;opacity:1;margin-top:12px}',
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-design-editor[hidden]{display:none}",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-drawer-header-reveal[hidden]{display:none!important}",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-result-card-summary{position:relative;display:grid;gap:8px;min-height:72px",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-result-disclosure[open]>.mdlx-result-card-summary::after{transform:rotate(45deg)}",
+    );
+    expect(MODELLIX_CLIENT_CSS).toContain(
+      ".mdlx-drawer-header-reveal{grid-template-rows:1fr;opacity:1;margin-top:12px}",
+    );
     expect(MODELLIX_CLIENT_CSS).not.toContain(".mdlx-advanced[open]>summary");
     expect(MODELLIX_CLIENT_CSS).toContain(
       ".mdlx-label>.mdlx-required,.mdlx-label>.mdlx-muted{margin-inline-start:4px}",

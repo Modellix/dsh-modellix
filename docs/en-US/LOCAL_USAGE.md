@@ -42,7 +42,7 @@ pnpm run verify:pack
 pnpm pack
 ```
 
-The repository root will contain a file such as `dsh-modellix-0.1.1.tgz`. Do not ask DSH to install the unbuilt TypeScript checkout directly.
+The repository root will contain a file such as `dsh-modellix-0.2.0.tgz`. Do not ask DSH to install the unbuilt TypeScript checkout directly.
 
 ## 3. Create an isolated local Harness environment
 
@@ -60,7 +60,7 @@ This affects only the current PowerShell process and its children. Omit this ste
 Install the tarball into the `web` profile and inspect the merged configuration:
 
 ```powershell
-dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
 dsh --profile web --dump-config
 ```
 
@@ -99,17 +99,17 @@ A fresh profile may first show Harness's own DeepSeek initialization dialog. Com
 2. Review the Design, LLM, and Web switches; all three start enabled.
 3. Select “Save and enable.”
 
-## 7. Use Design
+## 7. Use chat-first media creation
 
-1. Open the **Design** tab at the top of a conversation.
-2. Search models or filter them by image, video, or audio output.
-3. Select a model and enter its prompt. Many models need only a prompt; other controls and defaults come from the live Schema.
-4. For exact control, edit the advertised size, quality, duration, aspect ratio, or other parameters.
-5. Optionally describe changes under “Adjust parameters by chat,” review the proposed diff, and apply it. This can use LLM budget but never submits media by itself.
-6. Review the parameters and billing notice, then select “Confirm and generate” once.
-7. Follow Running, Succeeded, and Diagnostics records in the right pane; preview or download completed media.
+1. Open a conversation and describe the image, video, edit, transformation, or voice you want. Do not name tool functions.
+2. The Agent searches the live catalog and reads the selected model Schema when needed.
+3. For a request based on the previous result, the Agent reuses the latest relevant result URL and selects an edit/image-to-video/video-to-video model.
+4. The Agent submits once and checks at most once in that turn.
+5. Follow the live card in chat. It updates in place when the background task finishes; no second result card should appear.
+6. Select **Modellix Design** at the far right of the session header to see all current-session results.
+7. Use Preview/JSON on successful cards, image enlargement, native video/audio players, **Add URL to chat**, and **Download**.
 
-Generation may be billed. The plugin does not automatically retry a billed POST. If the outcome is unknown, inspect Results or the Modellix-side record before manually submitting again.
+The advanced exact-parameter editor remains internal but its entry is hidden in `0.2.0`. Routine UI flows do not display payment prompts; usage and details remain available in Modellix.
 
 ## 8. Use Modellix LLM models
 
@@ -119,9 +119,9 @@ Generation may be billed. The plugin does not automatically retry a billed POST.
 
 The catalog is live. The plugin does not invent fallback models when it cannot load that catalog.
 
-## 9. Use Web Search/Fetch
+## 9. Use automatic Web Search/Fetch
 
-With Web enabled, ask the Agent to search the public Web and read a relevant result. Harness's native `web_search` and `web_fetch` tools use the Modellix provider; the plugin does not add duplicate custom tools.
+With Web enabled, ask a current, external, URL, or source-verification question normally. The Agent automatically uses explicit `modellix_web_search` and `modellix_web_fetch` tools when needed; users do not need to name either tool.
 
 ## 10. Update the local plugin
 
@@ -135,7 +135,7 @@ After source changes:
 Set-Location 'D:\work\maas\githup\dsh-modellix'
 pnpm run verify:pack
 pnpm pack
-dsh plugin --profile web add .\dsh-modellix-0.1.1.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
 dsh --profile web --dump-config
 dsh --profile web --no-open
 ```
@@ -146,7 +146,9 @@ dsh --profile web --no-open
 | --- | --- |
 | A DeepSeek API Key dialog appears first | This is the fresh Harness profile's base initialization, not the Modellix dialog; complete it before configuring Modellix |
 | The CLI is logged in but the plugin still requests a Key | The CLI Keychain and Harness Credential service are separate; save it in the plugin UI or inject `MODELLIX_API_KEY` into the Harness process |
-| The Design tab is missing | Inspect `--dump-config`, confirm the plugin is installed in the running profile, and fully restart that profile |
+| Modellix Design is missing | Inspect `--dump-config`, confirm Design is enabled, and fully restart the running profile after an update |
+| A task remains stale in assistant prose | Current status belongs to the live card and right panel; `0.2.0` updates the card in the background and avoids nonterminal status wording in ordinary prose |
+| One task shows two cards | This is not expected in `0.2.0`; record the job/tool call ids without Secrets and report a duplicate-card defect |
 | The UI reports an invalid Key | Only an explicit Modellix 401 enters this state; replace a local Credential in settings, or update an environment source and restart |
 | Balance is insufficient | A 402 is not treated as an invalid Key; fund the account or change the task before retrying manually |
 | Requests are rate-limited | Wait for the 429 window to end before retrying manually |

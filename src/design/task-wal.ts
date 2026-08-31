@@ -20,6 +20,8 @@ export type DesignTaskState =
 export interface DesignTaskRecord {
   readonly requestId: string;
   readonly modelSlug: string;
+  /** Harness conversation that owns the result; null only for legacy records. */
+  readonly sessionId: string | null;
   /** Credential generation that created the remote task; null only for legacy v1 records. */
   readonly credentialEpoch: number | null;
   readonly taskId: string | null;
@@ -60,6 +62,8 @@ export type DesignWalEvent =
       readonly timestamp: number;
       readonly requestId: string;
       readonly modelSlug: string;
+      /** Optional only so older WAL documents remain readable after session isolation. */
+      readonly sessionId?: string;
       /** Optional only so pre-0.1.0 WAL documents fail safe instead of becoming unreadable. */
       readonly credentialEpoch?: number;
     }
@@ -153,10 +157,12 @@ export class DesignTaskRepository {
   async recordSubmitIntent(
     requestId: string,
     modelSlug: string,
+    sessionId: string,
     credentialEpoch: number,
   ): Promise<void> {
     requireId(requestId, "requestId");
     requireModelSlug(modelSlug);
+    requireId(sessionId, "sessionId");
     requireEpoch(credentialEpoch);
     const wal = await this.#loadWal();
     const records = replayDesignWal(wal.events);
@@ -169,6 +175,7 @@ export class DesignTaskRepository {
       timestamp: this.#clock.now(),
       requestId,
       modelSlug,
+      sessionId,
       credentialEpoch,
     });
   }
@@ -383,6 +390,7 @@ export function replayDesignWal(
       case "submit-intent": {
         requireId(event.requestId, "requestId");
         requireModelSlug(event.modelSlug);
+        if (event.sessionId !== undefined) requireId(event.sessionId, "sessionId");
         if (event.credentialEpoch !== undefined) requireEpoch(event.credentialEpoch);
         if (records.has(event.requestId)) {
           throw new DesignError("STORAGE_INVALID", "Design WAL has a duplicate requestId");
@@ -390,6 +398,7 @@ export function replayDesignWal(
         records.set(event.requestId, {
           requestId: event.requestId,
           modelSlug: event.modelSlug,
+          sessionId: event.sessionId ?? null,
           credentialEpoch: event.credentialEpoch ?? null,
           taskId: null,
           state: "submitting",
@@ -580,6 +589,7 @@ function checkpointRecords(
       timestamp: record.createdAt,
       requestId: record.requestId,
       modelSlug: record.modelSlug,
+      ...(record.sessionId === null ? {} : { sessionId: record.sessionId }),
       ...(record.credentialEpoch === null ? {} : { credentialEpoch: record.credentialEpoch }),
     });
     if (record.taskId !== null) {

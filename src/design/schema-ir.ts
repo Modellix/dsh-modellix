@@ -358,7 +358,7 @@ function discoverPostBody(
         path: "#/paths",
         keyword: "post",
         blocking: true,
-        message: "Multiple POST bodies were found; Design cannot safely select a paid operation",
+        message: "Multiple POST bodies were found; Design cannot safely select a submission operation",
       });
     }
     if (candidates[0] !== undefined) {
@@ -1014,6 +1014,14 @@ function safePattern(value: unknown): string | null {
 }
 
 function isSafeRegularExpression(pattern: string): boolean {
+  // Modellix image schemas publish dimensions as, for example,
+  // `^\d+\*\d+$`. Both variable-width digit runs are separated by a
+  // mandatory literal `*`, so this exact closed form is linear-time even
+  // though the generic conservative subset below permits only one variable
+  // quantifier.
+  if (pattern === "^\\d+\\*\\d+$") {
+    return true;
+  }
   // JavaScript RegExp has no execution deadline. Accept only an anchored,
   // group-free subset with at most one variable quantifier so an untrusted
   // Schema cannot introduce catastrophic or high-polynomial backtracking.

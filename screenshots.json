@@ -1,14 +1,14 @@
 [
   "docs/assets/settings-ready-en.webp",
   "docs/assets/settings-ready-zh.webp",
-  "docs/assets/design-desktop-en.webp",
-  "docs/assets/design-desktop-zh.webp",
-  "docs/assets/design-proposal-en.webp",
-  "docs/assets/design-proposal-zh.webp",
-  "docs/assets/design-results-media-en.webp",
-  "docs/assets/design-results-media-zh.webp",
+  "docs/assets/chat-media-generation-en.webp",
+  "docs/assets/chat-media-generation-zh.webp",
+  "docs/assets/design-results-drawer-en.webp",
+  "docs/assets/design-results-drawer-zh.webp",
+  "docs/assets/media-players-en.webp",
+  "docs/assets/media-players-zh.webp",
   "docs/assets/llm-model-selector-en.webp",
   "docs/assets/llm-model-selector-zh.webp",
-  "docs/assets/web-tools-en.webp",
-  "docs/assets/web-tools-zh.webp"
+  "docs/assets/web-tools-auto-en.webp",
+  "docs/assets/web-tools-auto-zh.webp"
 ]
