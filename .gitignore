@@ -1,5 +1,6 @@
 # Local agent instructions
 AGENTS.md
+SECONDARY_DEVELOPMENT_REFERENCE.md
 
 # Dependencies and build output
 node_modules/
