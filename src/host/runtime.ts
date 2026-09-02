@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Context } from "@deepseek-ai/cordis";
 import { getOrCreateAnonymousUserId } from "@deepseek-ai/dsh-anonymous-user-id";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
-import type { RpcResult } from "@deepseek-ai/dsh-host-apiproxy/api";
-import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
+import type { ConnectionRpcResult as RpcResult } from "@deepseek-ai/dsh-client-connection";
+import { SettingsConflictError, type SettingsNamespace } from "@deepseek-ai/dsh-settings";
 import type {} from "@deepseek-ai/dsh-client-connection";
 import type {} from "@deepseek-ai/dsh-agent";
 import type {} from "@deepseek-ai/dsh-credentials";
@@ -48,10 +48,7 @@ import {
   type LlmMaterializationReceipt,
   type LlmRouteLedger,
 } from "../llm/index.js";
-import {
-  createModellixWebProviders,
-  registerModellixWebProviderInstances,
-} from "../web/index.js";
+import { createModellixWebProviders } from "../web/index.js";
 import {
   CredentialBroker,
   CredentialValidationError,
@@ -68,7 +65,20 @@ import {
 } from "./settings.js";
 
 const RPC_CHANNEL = "/modellix";
-const LLM_SETTINGS_NAMESPACE = settingsNamespace("llm-pi-ai");
+
+/** rc.2 accepted an authority option; alpha.4 owns trust in Connection itself. */
+interface CompatibleConnectionRpc {
+  handle(
+    channel: string,
+    handler: (
+      endpoint: string,
+      payload: unknown,
+      signal: AbortSignal,
+    ) => Promise<RpcResult<unknown>>,
+    options?: { readonly authority: "loopback" },
+  ): () => Promise<void> | void;
+}
+const LLM_SETTINGS_NAMESPACE = "llm-pi-ai" as SettingsNamespace;
 const LLM_OWNERSHIP_ROLLBACK_FAILED = "MODELLIX_LLM_OWNERSHIP_ROLLBACK_FAILED";
 const LLM_MATERIALIZATION_RECOVERED = "MODELLIX_LLM_MATERIALIZATION_RECOVERED";
 const LLM_MATERIALIZATION_RECOVERY_FAILED = "MODELLIX_LLM_MATERIALIZATION_RECOVERY_FAILED";
@@ -134,6 +144,7 @@ export class ModellixRuntime {
   #credentialRecoveryRequestId: string | null = null;
   #designPollTimer: ReturnType<typeof setTimeout> | undefined;
   #disposeDesignTools: (() => void) | undefined;
+  #disposeWebTools: (() => void) | undefined;
   #closing = false;
   readonly #lifecycleAbort = new AbortController();
 
@@ -242,6 +253,9 @@ export class ModellixRuntime {
         this.syncDesignTools(next.services.design.enabled);
         if (next.services.design.enabled) this.scheduleDesignPoll(0);
       }
+      if (next.services.web.enabled !== previous.services.web.enabled) {
+        this.syncWebTools(next.services.web.enabled);
+      }
       if (
         next.services.llm.enabled !== previous.services.llm.enabled ||
         next.credentialEpoch !== previous.credentialEpoch
@@ -286,36 +300,12 @@ export class ModellixRuntime {
     });
 
     this.#ctx.effect(() => {
-      const providers = createModellixWebProviders({
-        isEnabled: () => this.#config.services.web.enabled,
-        hasCredential: () => this.credentialIsUsable(),
-        resolveCredential: async () => {
-          const hit = await this.resolveUsableCredential();
-          if (hit === undefined) this.requestCredentialRecovery();
-          return hit === undefined ? null : { apiKey: hit.value, credentialEpoch: hit.credentialEpoch };
-        },
-        getUserId: () => this.#userId,
-        isCredentialEpochCurrent: (epoch) => epoch === this.#config.credentialEpoch,
-        onCredentialRejected: async (epoch) => {
-          if (epoch !== this.#config.credentialEpoch) return;
-          this.markCredentialRejected(epoch);
-        },
-      });
-      const disposeProviders = registerModellixWebProviderInstances(
-        this.#ctx.web,
-        providers,
-      );
-      try {
-        const disposeTools = registerModellixWebTools(this.#ctx, providers);
-        return () => {
-          disposeTools();
-          disposeProviders();
-        };
-      } catch (error) {
-        disposeProviders();
-        throw error;
-      }
-    }, "dsh-modellix: Web providers and explicit Modellix tools");
+      this.syncWebTools(this.#config.services.web.enabled);
+      return () => {
+        this.#disposeWebTools?.();
+        this.#disposeWebTools = undefined;
+      };
+    }, "dsh-modellix: explicit Modellix Web tools");
 
     this.#ctx.on("agent/session-start", ({ agent }) => {
       const message = createModellixRoutingMessage({
@@ -325,7 +315,8 @@ export class ModellixRuntime {
       if (message !== null) agent.inject(message);
     });
 
-    this.#ctx.effect(() => this.#ctx.connection.rpc.handle(
+    const connectionRpc = this.#ctx.connection.rpc as unknown as CompatibleConnectionRpc;
+    this.#ctx.effect(() => connectionRpc.handle(
       RPC_CHANNEL,
       (endpoint, payload, signal) => this.handleRpc(endpoint, payload, signal),
       { authority: "loopback" },
@@ -1178,6 +1169,32 @@ export class ModellixRuntime {
     if (!enabled && this.#disposeDesignTools !== undefined) {
       this.#disposeDesignTools();
       this.#disposeDesignTools = undefined;
+    }
+  }
+
+  private syncWebTools(enabled: boolean): void {
+    if (enabled && this.#disposeWebTools === undefined) {
+      const providers = createModellixWebProviders({
+        isEnabled: () => this.#config.services.web.enabled,
+        hasCredential: () => this.credentialIsUsable(),
+        resolveCredential: async () => {
+          const hit = await this.resolveUsableCredential();
+          if (hit === undefined) this.requestCredentialRecovery();
+          return hit === undefined ? null : { apiKey: hit.value, credentialEpoch: hit.credentialEpoch };
+        },
+        getUserId: () => this.#userId,
+        isCredentialEpochCurrent: (epoch) => epoch === this.#config.credentialEpoch,
+        onCredentialRejected: async (epoch) => {
+          if (epoch !== this.#config.credentialEpoch) return;
+          this.markCredentialRejected(epoch);
+        },
+      });
+      this.#disposeWebTools = registerModellixWebTools(this.#ctx, providers);
+      return;
+    }
+    if (!enabled && this.#disposeWebTools !== undefined) {
+      this.#disposeWebTools();
+      this.#disposeWebTools = undefined;
     }
   }
 

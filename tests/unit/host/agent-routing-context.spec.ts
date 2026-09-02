@@ -30,8 +30,13 @@ describe("Modellix automatic Agent routing context", () => {
   it("omits disabled capabilities and returns no message when both are disabled", () => {
     expect(JSON.stringify(createModellixRoutingMessage({ mediaEnabled: false, webEnabled: true })))
       .not.toContain("modellix_media_list");
-    expect(JSON.stringify(createModellixRoutingMessage({ mediaEnabled: true, webEnabled: false })))
-      .not.toContain("web_search");
+    const mediaOnly = JSON.stringify(
+      createModellixRoutingMessage({ mediaEnabled: true, webEnabled: false }),
+    );
+    expect(mediaOnly).not.toContain("modellix_web_search");
+    expect(mediaOnly).not.toContain("modellix_web_fetch");
+    expect(mediaOnly).not.toContain("use the Modellix Web tools");
+    expect(mediaOnly).toContain("Harness-native web_search or web_fetch");
     expect(createModellixRoutingMessage({ mediaEnabled: false, webEnabled: false })).toBeNull();
   });
 });

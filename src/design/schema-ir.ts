@@ -1,13 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { inspectJsonBudget } from "../shared/json-budget.js";
+import type { JsonValue } from "../shared/json-value.js";
 import { DesignError } from "./errors.js";
 
-export type JsonPrimitive = null | boolean | number | string;
-export type JsonValue =
-  | JsonPrimitive
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
+export type { JsonPrimitive, JsonValue } from "../shared/json-value.js";
 
 export type UiFieldKind =
   | "string"
@@ -1300,7 +1297,7 @@ function jsonCompatible(value: unknown): JsonValue | undefined {
   if (Array.isArray(value)) {
     const items = value.map(jsonCompatible);
     return items.every((item) => item !== undefined)
-      ? (items as readonly JsonValue[])
+      ? (items as JsonValue[])
       : undefined;
   }
   const object = asRecord(value);

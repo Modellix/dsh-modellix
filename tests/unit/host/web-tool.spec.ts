@@ -1,6 +1,5 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type {
-  JsonValue,
   ToolDefinition,
   ToolResult,
   ToolRunContext,
@@ -18,6 +17,7 @@ import {
   createModellixWebToolDefinitions,
   registerModellixWebTools,
 } from "../../../src/host/web-tool.js";
+import type { JsonValue } from "../../../src/shared/json-value.js";
 
 function providerHarness(): {
   readonly providers: ModellixWebProviders;

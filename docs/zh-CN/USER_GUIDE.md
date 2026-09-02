@@ -2,13 +2,13 @@
 
 # dsh-modellix 用户指南
 
-本文说明 `0.2.0` 的当前体验。媒体创作以对话为主，不再存在独立 Design Tab；右侧 **Modellix Design** 是按会话隔离的结果工作区。
+本文说明 `0.2.1` 的当前体验。媒体创作以对话为主，不再存在独立 Design Tab；右侧 **Modellix Design** 是按会话隔离的结果工作区。
 
 ## 1. 安装与检查
 
 ### 环境要求
 
-- DeepSeek Harness `0.1.1-rc.2`
+- DeepSeek Harness `0.1.2-alpha.4`（最新支持版本）；继续兼容 `0.1.1-rc.2`
 - Node.js `^22.19.0 || >=24.0.0`
 - 有效的 Modellix API Key
 
@@ -28,7 +28,7 @@ dsh --profile web
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
 ```
 
 独立 Profile 与更新命令见 [LOCAL_USAGE.md](LOCAL_USAGE.md)。
@@ -80,7 +80,7 @@ dsh plugin --profile web add ./dsh-modellix-0.2.0.tgz
 - 结果列表和每张卡片默认展开。
 - 点击 **结果** 收起整个列表；点击卡片头部只收起该卡片。
 - 点击 X 关闭，键盘焦点回到入口。
-- 高级精准参数编辑器保留在实现中，但 `0.2.0` 隐藏入口。
+- 高级精准参数编辑器保留在实现中，但 `0.2.1` 隐藏入口。
 
 ## 4. 通过对话创建媒体
 
@@ -223,7 +223,7 @@ Provider 使用 OpenAI 兼容接口，重试次数为 `0`；目录不可用时�
 2. 需要页面全文时自动调用 `modellix_web_fetch`。
 3. 回答引用搜索/抓取来源。
 
-用户不需要说“使用 search/fetch”。若用户明确说不要浏览，Agent 不调用。路由上下文也会避免同一操作同时调用明确工具和原生 Provider 工具。
+用户不需要说“使用 search/fetch”。若用户明确说不要浏览，Agent 不调用。Modellix Web 开启时，路由上下文会避免同一操作同时调用两套工具；关闭时会移除两个明确工具及该路由上下文，当前 Profile 的原生 `web_search` / `web_fetch` 与 Provider 保持可用，Agent 可自动回退。
 
 ## 11. 设置与错误
 
@@ -231,7 +231,9 @@ Provider 使用 OpenAI 兼容接口，重试次数为 `0`；目录不可用时�
 
 - **Design：** 控制媒体工具、对话结果卡和结果面板。
 - **LLM：** 控制 Modellix 实时模型物化。
-- **Web：** 控制 Modellix Search/Fetch Provider 与明确工具。
+- **Web：** 只控制明确的 Modellix Search/Fetch 工具及 Modellix 优先路由，不改变 Harness 原生 Web 工具或 Provider。
+
+三个开关彼此独立。保存一个服务的变化，不会注册、注销或重配另外两个服务。
 
 ### Credential 状态
 
@@ -269,6 +271,8 @@ Provider 使用 OpenAI 兼容接口，重试次数为 `0`；目录不可用时�
 
 确认 Web 已开启，并检查当前 Agent 会话包含 `Web routing` 上下文。明确工具应显示为 `modellix_web_search` 与 `modellix_web_fetch`。
 
+若 Web 是有意关闭，两个明确工具与 Modellix `Web routing` 都不应出现；原生 `web_search` / `web_fetch` 按当前 Harness Profile 的配置继续工作。
+
 ### 提示模型 Schema 不可用
 
 刷新实时媒体目录，确认 `modellix_media_list` 返回的准确 slug，再调用 `modellix_media_schema`。解析器支持公开 OpenAPI 布局和受限共享引用；遇到不安全或不支持的结构时会阻止使用，而不是猜测。
@@ -279,11 +283,11 @@ Provider 使用 OpenAI 兼容接口，重试次数为 `0`；目录不可用时�
 
 ### 同一任务出现两张卡
 
-`0.2.0` 不应出现。请在不包含 Secret 的情况下记录两张卡的 job id 和 tool call id。生成卡应赢得当前会话的任务展示权，匹配的结果查询卡应被抑制。
+`0.2.1` 不应出现。请在不包含 Secret 的情况下记录两张卡的 job id 和 tool call id。生成卡应赢得当前会话的任务展示权，匹配的结果查询卡应被抑制。
 
 ### 显示其他会话结果
 
-新建 `0.2.0` 任务不应出现。请记录受影响的 session/task id，并按会话隔离缺陷报告。
+新建 `0.2.1` 任务不应出现。请记录受影响的 session/task id，并按会话隔离缺陷报告。
 
 ### 媒体不能播放
 

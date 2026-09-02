@@ -6,6 +6,23 @@ The format follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-02
+
+### Changed
+
+- Limited the Web switch to the explicit `modellix_web_search` and `modellix_web_fetch` capability and its Agent routing context. The plugin no longer overrides, enables, disables, or selects Harness native `web_search` / `web_fetch` tools and providers.
+- Updated the authoring baseline and public Client/Host integration to DeepSeek Harness `0.1.2-alpha.4`, including the current Connection RPC, Settings namespace, Client renderer, and Tool JSON type surfaces, while retaining `0.1.1-rc.2` runtime compatibility.
+
+### Fixed
+
+- Disabling Web now unregisters both explicit Modellix Web tools immediately, so a new Agent session falls back to the Harness-native Web capabilities configured by the active profile instead of spending a turn on a disabled Modellix tool.
+- Re-enabling Web restores both explicit tools and their Modellix-first routing without changing the independent Design or LLM service state.
+
+### Verification
+
+- Added Host lifecycle regression coverage for enabled → disabled → enabled Web transitions, including preservation of native Search/Fetch tools and providers, continued Design registration, unchanged LLM materialization, and omission of Modellix Web routing while disabled.
+- Added tarball cold-install and declaration-consumer verification against both Harness `0.1.2-alpha.4` and `0.1.1-rc.2`.
+
 ## [0.2.0] - 2026-08-31
 
 ### Added

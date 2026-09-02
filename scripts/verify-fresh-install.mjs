@@ -18,6 +18,8 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 const temporaryBase = realpathSync(tmpdir())
 const temporaryPrefix = 'dsh-modellix-fresh-install-'
 const runtimeNode = resolveRuntimeNode()
+const supportedHarnessVersions = Object.freeze(['0.1.1-rc.2', '0.1.2-alpha.4'])
+const harnessVersion = resolveHarnessVersion()
 
 /**
  * @param {string} message
@@ -25,6 +27,20 @@ const runtimeNode = resolveRuntimeNode()
  */
 function fail(message) {
   throw new Error(`fresh-install verification failed: ${message}`)
+}
+
+/** @returns {string} */
+function resolveHarnessVersion() {
+  const option = process.argv.indexOf('--harness')
+  const selected = option === -1 ? supportedHarnessVersions.at(-1) : process.argv[option + 1]
+  if (
+    selected === undefined ||
+    !supportedHarnessVersions.includes(selected) ||
+    (option !== -1 && process.argv.length !== option + 2)
+  ) {
+    fail(`--harness must be one of ${supportedHarnessVersions.join(', ')}`)
+  }
+  return selected
 }
 
 /**
@@ -166,8 +182,8 @@ assert.equal(typeof host.apply, 'function')
 assert.ok(host.Config !== undefined)
 
 const patch = await readFile(fileURLToPath(resolved.patch), 'utf8')
-assert.match(patch, /searchProvider:\s*modellix/u)
-assert.match(patch, /fetchProvider:\s*modellix/u)
+assert.doesNotMatch(patch, /(?:searchProvider|fetchProvider):/u)
+assert.doesNotMatch(patch, /(?:id|name):\s*(?:web|tool-web)\b/u)
 assert.match(patch, /name:\s*dsh-modellix/u)
 
 console.log('Installed package exports and Host import verified.')
@@ -301,6 +317,28 @@ function developmentVersion(name) {
   return version
 }
 
+/** @param {string} name */
+function harnessDependencyVersion(name) {
+  if (name === '@deepseek-ai/cordis') {
+    return harnessVersion === '0.1.1-rc.2' ? '4.0.1' : '4.0.2'
+  }
+  if (name.startsWith('@deepseek-ai/dsh-')) return harnessVersion
+  return packageJson.peerDependencies?.[name] ?? developmentVersion(name)
+}
+
+/** @returns {string[]} */
+function declarationHarnessPackages() {
+  if (harnessVersion === '0.1.1-rc.2') {
+    return [
+      '@deepseek-ai/dsh-client-runtime',
+      '@deepseek-ai/dsh-client-ui-primitives',
+      '@deepseek-ai/dsh-client-ui-slots',
+    ]
+  }
+  return Object.keys(packageJson.devDependencies ?? {})
+    .filter(name => name.startsWith('@deepseek-ai/dsh-'))
+}
+
 let temporaryRoot
 try {
   temporaryRoot = mkdtempSync(join(temporaryBase, temporaryPrefix))
@@ -333,19 +371,25 @@ try {
   const relativeTarball = relative(projectDirectory, tarballPath).replaceAll('\\', '/')
 
   const dependencies = Object.fromEntries([
-    ...Object.entries(packageJson.peerDependencies ?? {}),
-    // dsh-client-runtime/client's public declarations augment the shared SlotMap
-    // from this Harness SDK package. Install it explicitly so the consumer smoke
-    // exercises the declaration graph used by a real DSH Client workspace.
+    ...Object.keys(packageJson.peerDependencies ?? {})
+      .map(name => [name, harnessDependencyVersion(name)]),
+    // Install the selected Harness declaration graph explicitly. rc.2 still
+    // obtains the Slot runtime through dsh-client-runtime; alpha.4 split that
+    // graph across the public API, store, renderer, controller, and UI packages.
     ...[
       'typescript',
       '@types/node',
       '@types/react',
       '@types/react-dom',
-      '@deepseek-ai/dsh-client-ui-slots',
       'react',
+      ...declarationHarnessPackages(),
     ]
-      .map(name => [name, developmentVersion(name)]),
+      .map(name => [
+        name,
+        name.startsWith('@deepseek-ai/dsh-')
+          ? harnessDependencyVersion(name)
+          : developmentVersion(name),
+      ]),
     [packageJson.name, `file:${relativeTarball}`],
   ].sort(([left], [right]) => left.localeCompare(right)))
   const isolatedManifest = {
@@ -408,7 +452,7 @@ try {
   )
 
   console.log(
-    `Fresh install verified on ${runtimeVersion}: ${metadata.name}@${metadata.version}, Host import, ` +
+    `Fresh install verified with Harness ${harnessVersion} on ${runtimeVersion}: ${metadata.name}@${metadata.version}, Host import, ` +
     'executed Client factory, declarations, patch, and package exports.',
   )
 } finally {

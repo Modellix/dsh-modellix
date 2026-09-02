@@ -1,4 +1,4 @@
-import type { JsonValue, ToolDefinition } from "@deepseek-ai/dsh-tools";
+import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -11,6 +11,7 @@ import {
   createModellixDesignToolDefinitions,
   type DesignToolController,
 } from "../../../src/host/design-tool.js";
+import type { JsonValue } from "../../../src/shared/json-value.js";
 
 function tools(): ReadonlyMap<string, ToolDefinition> {
   const controller = { handle: vi.fn() } as unknown as DesignToolController;

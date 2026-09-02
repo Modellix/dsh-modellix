@@ -367,7 +367,6 @@ function RemoveCredentialDialog({
     <Modal
       open={surfaceOpen}
       title={t("removeTitle")}
-      closeLabel={t("cancel")}
       onClose={onClose}
       headless
       className="mdlx-modal mdlx-modal-confirm"

@@ -1,7 +1,6 @@
 import type { Context } from "@deepseek-ai/cordis";
 import {
   defineTool,
-  type JsonValue,
   type ToolDefinition,
   type ToolResult,
   type WebFetchResultView,
@@ -13,6 +12,7 @@ import type {
   WebSearchResult,
   WebSearchSource,
 } from "@deepseek-ai/dsh-web";
+import type { JsonValue } from "../shared/json-value.js";
 
 import {
   DEFAULT_WEB_SEARCH_MAX_RESULTS,

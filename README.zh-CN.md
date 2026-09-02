@@ -8,6 +8,11 @@
 
 ![真实中文 Harness 会话中已完成的 Modellix 图片结果](docs/assets/chat-media-generation-zh.webp)
 
+## 0.2.1 的主要变化
+
+- Web 开关现在只注销 `modellix_web_search` 与 `modellix_web_fetch`。Harness 原生 Web 工具和 Provider 保持可用，关闭 Modellix Web 后会回退到当前 Profile 的默认能力。
+- 开发与运行时集成已适配 Harness `0.1.2-alpha.4`，并继续兼容 `0.1.1-rc.2`。
+
 ## 0.2.0 的主要变化
 
 - 删除独立 Design Tab，对话成为媒体创作主界面。
@@ -30,7 +35,7 @@
 
 ## 环境要求
 
-- DeepSeek Harness `0.1.1-rc.2`
+- DeepSeek Harness `0.1.2-alpha.4`（最新支持版本）；继续兼容 `0.1.1-rc.2`
 - 已发布包运行时：Node.js `^22.19.0 || >=24.0.0`
 - 源码开发与发布校验：Node.js `24.18.1`、pnpm `11.24.0`
 - 有效的 [Modellix API Key](https://docs.modellix.ai/get-started)
@@ -55,7 +60,7 @@ dsh --profile web
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
 ```
 
 完整 Windows 本地流程见[本地使用指南](docs/zh-CN/LOCAL_USAGE.md)。
@@ -105,7 +110,7 @@ Agent 会按实际情况：
 - 整个结果列表默认展开，可点击收起。
 - 每张结果卡默认展开，可点击卡片头部收起。
 - 点击 X 关闭后，焦点会回到入口按钮。
-- 高级精准参数编辑器已保留，但 `0.2.0` 暂不显示入口；普通用户通过 Chat 使用。
+- 高级精准参数编辑器已保留，但 `0.2.1` 暂不显示入口；普通用户通过 Chat 使用。
 - 560px 及以下使用可用视口全宽；360px 及以下入口变为可触达的紧凑按钮。
 
 ## LLM 模型
@@ -118,7 +123,7 @@ Agent 会按实际情况：
 
 用户不需要说出工具名。遇到实时、变化中、外部或需要来源核验的问题，Agent 会使用 `modellix_web_search`；用户提供公开 URL，或搜索结果需要阅读全文时，会使用 `modellix_web_fetch`。
 
-明确的 Modellix 工具与 Harness 原生 Provider 共用底层服务，但路由规则会阻止同一操作同时调用两套工具。失败或结果未知的 Web 请求不会自动重复。
+Web 开启时，插件只注册两个明确的 Modellix 工具，并要求 Agent 在适用任务中优先使用它们。关闭 Web 会注销这两个工具并移除 Modellix Web 路由上下文；Harness 原生 `web_search` / `web_fetch` 及其已配置 Provider 不受影响，仍可被 Agent 自动选择。失败或结果未知的 Modellix Web 请求不会自动重复。
 
 ![真实中文 Agent 回合自动使用 Modellix Search 与 Fetch](docs/assets/web-tools-auto-zh.webp)
 
@@ -128,7 +133,7 @@ Modellix 设置页包括：
 
 - Credential 是否已配置、验证状态和来源；
 - 本地可写 Credential 的更换与移除；
-- Design、LLM、Web 独立开关；
+- Design、LLM、Web 独立开关，每个开关只改变自身的 Modellix 能力；
 - LLM 实时目录健康、数量、刷新时间和手动刷新。
 
 只有 HTTP 401 会把 Credential 标记为无效。HTTP 402、429、网络错误和 5xx 使用各自恢复状态。并发 401 会合并为一个 Credential 弹窗。

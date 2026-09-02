@@ -3,12 +3,12 @@ import { createHash } from "node:crypto";
 import type { Context } from "@deepseek-ai/cordis";
 import {
   defineTool,
-  type JsonValue as ToolJsonValue,
   type ToolDefinition,
   type ToolRunContext,
 } from "@deepseek-ai/dsh-tools";
 
 import { DesignError, type JsonValue as DesignJsonValue } from "../design/index.js";
+import type { JsonValue as ToolJsonValue } from "../shared/json-value.js";
 import {
   MediaUploadClient,
   prepareMediaUploadFromPath,

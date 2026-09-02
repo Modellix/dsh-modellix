@@ -2,13 +2,13 @@
 
 # dsh-modellix User Guide
 
-This guide describes the current `0.2.0` experience. Media creation is chat-first; there is no standalone Design tab. The right-side **Modellix Design** panel is a session-scoped result workspace.
+This guide describes the current `0.2.1` experience. Media creation is chat-first; there is no standalone Design tab. The right-side **Modellix Design** panel is a session-scoped result workspace.
 
 ## 1. Install and verify
 
 ### Requirements
 
-- DeepSeek Harness `0.1.1-rc.2`
+- DeepSeek Harness `0.1.2-alpha.4` (latest supported); `0.1.1-rc.2` remains supported
 - Node.js `^22.19.0 || >=24.0.0`
 - A valid Modellix API Key
 
@@ -28,7 +28,7 @@ To use a local package artifact:
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
 ```
 
 See [LOCAL_USAGE.md](LOCAL_USAGE.md) for isolated-profile setup and update commands.
@@ -80,7 +80,7 @@ It does not add a standalone Design tab.
 - Results and every card are expanded by default.
 - Select **Results** to collapse the whole list; select a card header to collapse only that card.
 - Select X to close. Keyboard focus returns to the launcher.
-- The advanced exact-parameter editor remains in the implementation but its entry is hidden for `0.2.0`.
+- The advanced exact-parameter editor remains in the implementation but its entry is hidden for `0.2.1`.
 
 ## 4. Create media by chatting
 
@@ -223,7 +223,7 @@ Expected flow:
 2. When full-page content is needed, Agent calls `modellix_web_fetch`.
 3. The answer cites the fetched/source pages.
 
-The user should not need to say “use search” or “use fetch.” If the user explicitly says not to browse, the Agent does not call them. The routing context also prevents duplicate calls to both the explicit tools and native provider tools for the same operation.
+The user should not need to say “use search” or “use fetch.” If the user explicitly says not to browse, the Agent does not call them. When Modellix Web is enabled, its routing context prevents duplicate calls to both tool families for the same operation. When it is disabled, the two explicit Modellix tools and that routing context are removed; the profile's native `web_search` / `web_fetch` tools and providers remain available for automatic fallback.
 
 ## 11. Settings and errors
 
@@ -231,7 +231,9 @@ The user should not need to say “use search” or “use fetch.” If the user
 
 - **Design:** controls media tools, chat result views, and the result panel.
 - **LLM:** controls live Modellix model materialization.
-- **Web:** controls Modellix Search/Fetch providers and explicit tools.
+- **Web:** controls only the explicit Modellix Search/Fetch tools and Modellix-first routing. It does not change Harness-native Web tools or providers.
+
+The three switches are independent. Saving one service change does not register, unregister, or reconfigure either of the other two services.
 
 ### Credential status
 
@@ -269,6 +271,8 @@ Confirm Design is enabled, inspect `dsh --profile web --dump-config`, and fully 
 
 Confirm Web is enabled and the current Agent session contains the `Web routing` context. The explicit tools should appear as `modellix_web_search` and `modellix_web_fetch`.
 
+If Web is intentionally disabled, neither explicit tool should appear and the session should not contain Modellix `Web routing`; native `web_search` / `web_fetch` behavior continues according to the active Harness profile.
+
 ### A model Schema is reported as unavailable
 
 Refresh the live media catalog, verify the exact model slug returned by `modellix_media_list`, and read `modellix_media_schema` again. The parser supports documented OpenAPI layouts and bounded shared references; it blocks unsafe or unsupported contracts instead of guessing.
@@ -279,11 +283,11 @@ Keep the conversation open long enough for the Client watcher, verify the Creden
 
 ### Two cards represent one task
 
-This is not expected in `0.2.0`. Capture the two job ids and tool call ids without Secrets. The generation card should win the per-session task claim, and the matching result-query card should be suppressed.
+This is not expected in `0.2.1`. Capture the two job ids and tool call ids without Secrets. The generation card should win the per-session task claim, and the matching result-query card should be suppressed.
 
 ### Results from another conversation appear
 
-This is not expected for new `0.2.0` tasks. Record the affected session/task ids and report it as a session-isolation defect.
+This is not expected for new `0.2.1` tasks. Record the affected session/task ids and report it as a session-isolation defect.
 
 ### Media cannot play
 

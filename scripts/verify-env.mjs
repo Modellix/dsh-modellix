@@ -5,9 +5,12 @@ const expected = Object.freeze({
   node: '24.18.1',
   nodeEngine: '^22.19.0 || >=24.0.0',
   pnpm: '11.24.0',
-  dsh: '0.1.1-rc.2',
-  cordis: '4.0.1',
-  schemastery: '3.18.1',
+  activeDsh: Object.freeze(['0.1.1-rc.2', '0.1.2-alpha.4']),
+  harnessDev: '0.1.2-alpha.4',
+  harnessPeer: '0.1.1-rc.2 || 0.1.2-alpha.4',
+  cordisDev: '4.0.2',
+  cordisPeer: '4.0.1 || 4.0.2',
+  schemastery: '3.18.2',
 })
 
 const harnessPeers = Object.freeze([
@@ -17,14 +20,13 @@ const harnessPeers = Object.freeze([
   '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-client-connection',
   '@deepseek-ai/dsh-client-locale',
-  '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-input-trigger',
   '@deepseek-ai/dsh-client-ui-layout',
+  '@deepseek-ai/dsh-client-ui-renderer',
   '@deepseek-ai/dsh-client-ui-settings',
   '@deepseek-ai/dsh-client-ui-tool',
   '@deepseek-ai/dsh-credentials',
-  '@deepseek-ai/dsh-host-apiproxy',
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-llm-pi-ai',
@@ -83,23 +85,35 @@ function assertVersion(label, actual, wanted) {
   if (actual !== wanted) fail(`${label} must be ${wanted}, received ${actual}`)
 }
 
+/**
+ * @param {string} label
+ * @param {unknown} actual
+ * @param {readonly string[]} supported
+ */
+function assertSupportedVersion(label, actual, supported) {
+  if (typeof actual !== 'string' || !supported.includes(actual)) {
+    fail(`${label} must be one of ${supported.join(', ')}, received ${String(actual)}`)
+  }
+}
+
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 assertVersion('Node.js', process.versions.node, expected.node)
 assertVersion('pnpm', activePnpmVersion(), expected.pnpm)
-assertVersion('DSH', commandVersion('dsh'), expected.dsh)
+const activeDsh = commandVersion('dsh')
+assertSupportedVersion('DSH', activeDsh, expected.activeDsh)
 assertVersion('packageManager', packageJson.packageManager, `pnpm@${expected.pnpm}`)
 assertVersion('engines.node', packageJson.engines?.node, expected.nodeEngine)
 assertVersion('engines.pnpm', packageJson.engines?.pnpm, expected.pnpm)
 assertVersion('devEngines.runtime.version', packageJson.devEngines?.runtime?.version, expected.node)
 assertVersion('devEngines.packageManager.version', packageJson.devEngines?.packageManager?.version, expected.pnpm)
 assertVersion('dependencies.@deepseek-ai/schemastery', packageJson.dependencies?.['@deepseek-ai/schemastery'], expected.schemastery)
-assertVersion('peerDependencies.@deepseek-ai/cordis', packageJson.peerDependencies?.['@deepseek-ai/cordis'], expected.cordis)
-assertVersion('devDependencies.@deepseek-ai/cordis', packageJson.devDependencies?.['@deepseek-ai/cordis'], expected.cordis)
+assertVersion('peerDependencies.@deepseek-ai/cordis', packageJson.peerDependencies?.['@deepseek-ai/cordis'], expected.cordisPeer)
+assertVersion('devDependencies.@deepseek-ai/cordis', packageJson.devDependencies?.['@deepseek-ai/cordis'], expected.cordisDev)
 
 for (const name of harnessPeers) {
-  assertVersion(`peerDependencies.${name}`, packageJson.peerDependencies?.[name], expected.dsh)
-  assertVersion(`devDependencies.${name}`, packageJson.devDependencies?.[name], expected.dsh)
+  assertVersion(`peerDependencies.${name}`, packageJson.peerDependencies?.[name], expected.harnessPeer)
+  assertVersion(`devDependencies.${name}`, packageJson.devDependencies?.[name], expected.harnessDev)
 }
 
 const uncheckedHarnessPeers = Object.keys(packageJson.peerDependencies ?? {})
@@ -109,7 +123,7 @@ if (uncheckedHarnessPeers.length > 0) {
 }
 
 for (const name of authoringOnly) {
-  assertVersion(`devDependencies.${name}`, packageJson.devDependencies?.[name], expected.dsh)
+  assertVersion(`devDependencies.${name}`, packageJson.devDependencies?.[name], expected.harnessDev)
   if (packageJson.peerDependencies?.[name] !== undefined) fail(`${name} must remain authoring-only, not a runtime peer`)
 }
 
@@ -117,4 +131,4 @@ if (packageJson.dependencies?.['@deepseek-ai/dsh'] !== undefined || packageJson.
   fail('@deepseek-ai/dsh must be provisioned as the acceptance CLI, not installed into the plugin dependency graph')
 }
 
-console.log(`Environment verified: Node ${expected.node}, pnpm ${expected.pnpm}, DSH ${expected.dsh}.`)
+console.log(`Environment verified: Node ${expected.node}, pnpm ${expected.pnpm}, DSH ${activeDsh}; authoring baseline ${expected.harnessDev}.`)

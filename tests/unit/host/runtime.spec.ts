@@ -1,6 +1,6 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { createHash } from "node:crypto";
-import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
+import { SettingsConflictError, type SettingsNamespace } from "@deepseek-ai/dsh-settings";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -131,6 +131,81 @@ describe("ModellixRuntime Host contracts", () => {
     await ModellixRuntime.create(missing.context);
     expect(missing.startAgentSession()).toEqual([]);
     await missing.dispose();
+  });
+
+  it("toggles only explicit Modellix Web tools without touching Harness defaults", async () => {
+    const harness = new RuntimeHarness({ config: configWith({ llm: false }) });
+    harness.installDefaultWebCapabilities();
+    installFetch(rejectUnexpectedFetch);
+    await ModellixRuntime.create(harness.context);
+
+    expect(harness.registeredSearchProviders).toHaveLength(1);
+    expect(harness.registeredFetchProviders).toHaveLength(1);
+    expect(harness.registeredTools.map(({ name }) => name)).toEqual(
+      expect.arrayContaining([
+        "web_search",
+        "web_fetch",
+        "modellix_web_search",
+        "modellix_web_fetch",
+        "modellix_media_list",
+      ]),
+    );
+    const llmMutationsBeforeToggle = harness.settings.runtimeMutations
+      .filter((namespace) => namespace === "llm-pi-ai").length;
+
+    const disabled = await harness.rpcValue<{
+      readonly accepted: boolean;
+      readonly state: ModellixRuntimeState;
+    }>("settings/toggles", {
+      version: 1,
+      expectedSettingsRevision: 0,
+      services: { design: true, llm: false, web: false },
+    });
+    expect(disabled.accepted).toBe(true);
+    await harness.settings.drainWatchers();
+
+    expect(harness.registeredSearchProviders).toHaveLength(1);
+    expect(harness.registeredFetchProviders).toHaveLength(1);
+    expect(harness.registeredTools.map(({ name }) => name)).not.toContain("modellix_web_search");
+    expect(harness.registeredTools.map(({ name }) => name)).not.toContain("modellix_web_fetch");
+    expect(harness.registeredTools.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(["web_search", "web_fetch", "modellix_media_list"]),
+    );
+    expect(() => harness.executeTool("modellix_web_search", { query: "current news" }))
+      .toThrow("Tool is not registered: modellix_web_search");
+    await expect(harness.executeTool("web_search", { query: "current news" })).resolves.toEqual({
+      provider: "default-search",
+    });
+    await expect(harness.executeTool("web_fetch", { url: "https://example.com" })).resolves.toEqual({
+      provider: "default-fetch",
+    });
+    expect(harness.settings.runtimeMutations
+      .filter((namespace) => namespace === "llm-pi-ai")).toHaveLength(llmMutationsBeforeToggle);
+    expect(harness.startAgentSession()).toEqual([]);
+
+    const enabled = await harness.rpcValue<{
+      readonly accepted: boolean;
+      readonly state: ModellixRuntimeState;
+    }>("settings/toggles", {
+      version: 1,
+      expectedSettingsRevision: disabled.state.settingsRevision,
+      services: { design: true, llm: false, web: true },
+    });
+    expect(enabled.accepted).toBe(true);
+    await harness.settings.drainWatchers();
+
+    expect(harness.registeredSearchProviders).toHaveLength(1);
+    expect(harness.registeredFetchProviders).toHaveLength(1);
+    expect(harness.registeredTools.map(({ name }) => name)).toEqual(
+      expect.arrayContaining([
+        "web_search",
+        "web_fetch",
+        "modellix_web_search",
+        "modellix_web_fetch",
+        "modellix_media_list",
+      ]),
+    );
+    await harness.dispose();
   });
 
   it("initializes without a Secret and exposes only write-safe Credential metadata", async () => {
@@ -1005,6 +1080,8 @@ class RuntimeHarness {
   readonly loggerErrors: unknown[][] = [];
   readonly loggerWarnings: unknown[][] = [];
   readonly registeredTools: RuntimeTool[] = [];
+  readonly registeredSearchProviders: unknown[] = [];
+  readonly registeredFetchProviders: unknown[] = [];
   readonly #designValues: Record<string, string> = {};
   #credentialListeners = new Set<CredentialListener>();
   #agentSessionStartListeners = new Set<AgentSessionStartListener>();
@@ -1060,6 +1137,21 @@ class RuntimeHarness {
     });
   }
 
+  installDefaultWebCapabilities(): void {
+    this.registeredSearchProviders.push({ id: "default-search" });
+    this.registeredFetchProviders.push({ id: "default-fetch" });
+    this.registeredTools.push(
+      {
+        name: "web_search",
+        execute: async () => ({ provider: "default-search" }),
+      },
+      {
+        name: "web_fetch",
+        execute: async () => ({ provider: "default-fetch" }),
+      },
+    );
+  }
+
   async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -1102,8 +1194,20 @@ class RuntimeHarness {
       credentials: this.credentials.service,
       llm: this.llm.service,
       web: {
-        registerSearchProvider: () => () => undefined,
-        registerFetchProvider: () => () => undefined,
+        registerSearchProvider: (provider: unknown) => {
+          this.registeredSearchProviders.push(provider);
+          return () => {
+            const index = this.registeredSearchProviders.indexOf(provider);
+            if (index >= 0) this.registeredSearchProviders.splice(index, 1);
+          };
+        },
+        registerFetchProvider: (provider: unknown) => {
+          this.registeredFetchProviders.push(provider);
+          return () => {
+            const index = this.registeredFetchProviders.indexOf(provider);
+            if (index >= 0) this.registeredFetchProviders.splice(index, 1);
+          };
+        },
       },
       tools: {
         register: (tool: RuntimeTool) => {
@@ -1404,7 +1508,7 @@ class FakeSettings {
       }
       if (expectedRevision !== undefined && expectedRevision !== this.#configRevision) {
         throw new SettingsConflictError(
-          settingsNamespace("modellix"),
+          "modellix" as SettingsNamespace,
           expectedRevision,
           this.#configRevision,
         );
@@ -1428,7 +1532,7 @@ class FakeSettings {
     }
     if (expectedRevision !== undefined && expectedRevision !== this.#llmRevision) {
       throw new SettingsConflictError(
-        settingsNamespace("llm-pi-ai"),
+        "llm-pi-ai" as SettingsNamespace,
         expectedRevision,
         this.#llmRevision,
       );

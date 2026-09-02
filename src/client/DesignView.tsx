@@ -1116,7 +1116,6 @@ function ResultResource({
         <Modal
           open={imageSurfaceOpen}
           title={t("imageViewerTitle")}
-          closeLabel={t("close")}
           onClose={closeImage}
           headless
           className="mdlx-modal mdlx-image-modal"

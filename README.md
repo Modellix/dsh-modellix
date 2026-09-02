@@ -8,6 +8,11 @@
 
 ![A real English Harness conversation showing a completed Modellix image result](docs/assets/chat-media-generation-en.webp)
 
+## What changed in 0.2.1
+
+- The Web switch now unregisters only `modellix_web_search` and `modellix_web_fetch`. Harness-native Web tools and providers remain available, so turning Modellix Web off falls back to the active profile's defaults.
+- Updated the authoring and runtime integration for Harness `0.1.2-alpha.4`, while retaining `0.1.1-rc.2` compatibility.
+
 ## What changed in 0.2.0
 
 - Removed the standalone Design tab. Chat is now the primary media workflow.
@@ -30,7 +35,7 @@
 
 ## Requirements
 
-- DeepSeek Harness `0.1.1-rc.2`
+- DeepSeek Harness `0.1.2-alpha.4` (latest supported); `0.1.1-rc.2` remains supported
 - Published-package runtime: Node.js `^22.19.0 || >=24.0.0`
 - Source development and release verification: Node.js `24.18.1`, pnpm `11.24.0`
 - A valid [Modellix API Key](https://docs.modellix.ai/get-started)
@@ -55,7 +60,7 @@ To install a trusted local build:
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
 ```
 
 See [local usage](docs/en-US/LOCAL_USAGE.md) for the complete Windows-first workflow.
@@ -105,7 +110,7 @@ The **Modellix Design** button sits at the far right of the conversation header,
 - The entire Results list is expanded by default and can be collapsed.
 - Every result card is expanded by default and can be collapsed by selecting its header.
 - The close button returns focus to the launcher.
-- The advanced exact-parameter editor remains implemented but its entry is hidden in `0.2.0`; ordinary users work through chat.
+- The advanced exact-parameter editor remains implemented but its entry is hidden in `0.2.1`; ordinary users work through chat.
 - At 560 px and below, the panel uses the available viewport width. At 360 px and below, the launcher becomes a reachable compact control.
 
 ## LLM models
@@ -118,7 +123,7 @@ When LLM is enabled, the plugin reads the live Modellix catalog and adds those m
 
 Users do not need to name a tool. For current, changing, external, or source-verification questions, the Agent is instructed to use `modellix_web_search`. When the user provides a public URL or a search result needs full-page reading, it uses `modellix_web_fetch`.
 
-The explicit Modellix tools and the native Harness providers share the same underlying service, but the routing instruction prevents both tool families from being called for the same operation. Failed or unknown Web requests are not repeated automatically.
+While Web is enabled, the plugin registers only the two explicit Modellix tools and asks the Agent to prefer them for matching work. Disabling Web unregisters those tools and removes the Modellix Web routing context; Harness-native `web_search` / `web_fetch` tools and their configured providers remain untouched and can be selected automatically. Failed or unknown Modellix Web requests are not repeated automatically.
 
 ![A real English Agent turn automatically using Modellix Search and Fetch](docs/assets/web-tools-auto-en.webp)
 
@@ -128,7 +133,7 @@ The Modellix settings section shows:
 
 - Credential configured/verification status and source;
 - replacement and removal actions for a writable local Credential;
-- independent Design, LLM, and Web switches;
+- independent Design, LLM, and Web switches; each switch changes only its own Modellix capability;
 - live LLM catalog health, count, refresh time, and manual refresh.
 
 Only HTTP 401 marks a Credential invalid. HTTP 402, 429, network failures, and 5xx retain their own recovery states. Concurrent 401 responses are coalesced into one Credential dialog.

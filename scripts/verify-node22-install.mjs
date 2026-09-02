@@ -75,7 +75,11 @@ if (selected === undefined) {
   )
 }
 
-const result = spawnSync(process.execPath, ['scripts/verify-fresh-install.mjs'], {
+const result = spawnSync(process.execPath, [
+  'scripts/verify-fresh-install.mjs',
+  '--harness',
+  '0.1.2-alpha.4',
+], {
   cwd: packageRoot,
   encoding: 'utf8',
   env: { ...process.env, MODELLIX_FRESH_INSTALL_RUNTIME_NODE: selected.path },

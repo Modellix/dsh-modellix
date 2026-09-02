@@ -8,7 +8,7 @@
 
 需要：
 
-- DeepSeek Harness `0.1.1-rc.2`
+- DeepSeek Harness `0.1.2-alpha.4`（最新支持版本）；继续兼容 `0.1.1-rc.2`
 - Node.js `24.18.1`；运行已发布包也支持 `^22.19.0`
 - pnpm `11.24.0`
 - 有效的 Modellix API Key
@@ -42,7 +42,7 @@ pnpm run verify:pack
 pnpm pack
 ```
 
-完成后，仓库根目录会生成类似 `dsh-modellix-0.2.0.tgz` 的文件。不要直接把未构建的 TypeScript 源码交给 DSH 安装。
+完成后，仓库根目录会生成类似 `dsh-modellix-0.2.1.tgz` 的文件。不要直接把未构建的 TypeScript 源码交给 DSH 安装。
 
 ## 3. 创建独立的本地 Harness 环境
 
@@ -60,7 +60,7 @@ New-Item -ItemType Directory -Force -Path $env:DSH_HOME | Out-Null
 把刚生成的 tarball 安装到 `web` Profile：
 
 ```powershell
-dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.1.tgz
 dsh --profile web --dump-config
 ```
 
@@ -109,7 +109,7 @@ dsh --profile web --no-open
 6. 点击会话头部最右侧 **Modellix Design**，查看当前会话全部结果。
 7. 成功卡可用预览/JSON、图片放大、原生视频/音频播放器、**添加 URL 到对话框** 和 **下载**。
 
-高级精准参数编辑器继续保留，但 `0.2.0` 暂不显示入口。常规 UI 不显示付费提示；消耗与明细在 Modellix 查看。
+高级精准参数编辑器继续保留，但 `0.2.1` 暂不显示入口。常规 UI 不显示付费提示；消耗与明细在 Modellix 查看。
 
 ## 8. 使用 Modellix LLM
 
@@ -123,6 +123,8 @@ dsh --profile web --no-open
 
 确认 Web 开关开启后，正常提出实时、外部、URL 或来源核验问题。Agent 会按需自动使用明确的 `modellix_web_search` 与 `modellix_web_fetch`，用户不需要说出工具名。
 
+关闭 Web 后，这两个明确工具会被注销。插件不会更改当前 Profile 的原生 `web_search` / `web_fetch` 或 Provider 选择，因此原生自动联网能力仍可使用。
+
 ## 10. 更新本地插件
 
 源码变化后：
@@ -135,7 +137,7 @@ dsh --profile web --no-open
 Set-Location 'D:\work\maas\githup\dsh-modellix'
 pnpm run verify:pack
 pnpm pack
-dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.1.tgz
 dsh --profile web --dump-config
 dsh --profile web --no-open
 ```
@@ -147,8 +149,8 @@ dsh --profile web --no-open
 | 先出现 DeepSeek API Key 弹窗 | 这是全新 Harness Profile 的基础初始化，不是 Modellix 弹窗；完成后继续配置 Modellix |
 | `modellix-cli` 已登录但插件仍要求 Key | CLI Keychain 与 Harness Credential 相互独立；在插件 UI 保存，或给 Harness 启动进程设置 `MODELLIX_API_KEY` |
 | 看不到 Modellix Design | 检查 `--dump-config`、确认 Design 已开启，并在更新后完整重启运行中的 Profile |
-| 助手正文里的状态看起来旧 | 当前状态属于实时卡片与右侧面板；`0.2.0` 后台更新卡片，并避免在普通正文写非终态 |
-| 一个任务显示两张卡 | `0.2.0` 不应出现；在不包含 Secret 的情况下记录 job/tool call id 并报告重复卡缺陷 |
+| 助手正文里的状态看起来旧 | 当前状态属于实时卡片与右侧面板；`0.2.1` 后台更新卡片，并避免在普通正文写非终态 |
+| 一个任务显示两张卡 | `0.2.1` 不应出现；在不包含 Secret 的情况下记录 job/tool call id 并报告重复卡缺陷 |
 | 页面提示 Key 无效 | 只有 Modellix 明确返回 401 才会进入该状态；本地 Credential 可在设置中更换，环境来源需在外部更新并重启 |
 | 余额不足 | 402 不会被误报为 Key 无效；充值或调整任务后手动重试 |
 | 请求过多 | 等待 429 限流窗口结束后再手动重试 |

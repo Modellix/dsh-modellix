@@ -8,7 +8,7 @@ This guide shows how to build `dsh-modellix` from the current source checkout on
 
 You need:
 
-- DeepSeek Harness `0.1.1-rc.2`
+- DeepSeek Harness `0.1.2-alpha.4` (latest supported); `0.1.1-rc.2` remains supported
 - Node.js `24.18.1`; the published runtime also supports `^22.19.0`
 - pnpm `11.24.0`
 - A valid Modellix API Key
@@ -42,7 +42,7 @@ pnpm run verify:pack
 pnpm pack
 ```
 
-The repository root will contain a file such as `dsh-modellix-0.2.0.tgz`. Do not ask DSH to install the unbuilt TypeScript checkout directly.
+The repository root will contain a file such as `dsh-modellix-0.2.1.tgz`. Do not ask DSH to install the unbuilt TypeScript checkout directly.
 
 ## 3. Create an isolated local Harness environment
 
@@ -60,7 +60,7 @@ This affects only the current PowerShell process and its children. Omit this ste
 Install the tarball into the `web` profile and inspect the merged configuration:
 
 ```powershell
-dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.1.tgz
 dsh --profile web --dump-config
 ```
 
@@ -109,7 +109,7 @@ A fresh profile may first show Harness's own DeepSeek initialization dialog. Com
 6. Select **Modellix Design** at the far right of the session header to see all current-session results.
 7. Use Preview/JSON on successful cards, image enlargement, native video/audio players, **Add URL to chat**, and **Download**.
 
-The advanced exact-parameter editor remains internal but its entry is hidden in `0.2.0`. Routine UI flows do not display payment prompts; usage and details remain available in Modellix.
+The advanced exact-parameter editor remains internal but its entry is hidden in `0.2.1`. Routine UI flows do not display payment prompts; usage and details remain available in Modellix.
 
 ## 8. Use Modellix LLM models
 
@@ -123,6 +123,8 @@ The catalog is live. The plugin does not invent fallback models when it cannot l
 
 With Web enabled, ask a current, external, URL, or source-verification question normally. The Agent automatically uses explicit `modellix_web_search` and `modellix_web_fetch` tools when needed; users do not need to name either tool.
 
+With Web disabled, those two explicit tools are unregistered. The plugin does not alter the profile's native `web_search` / `web_fetch` tools or provider selection, so native automatic Web behavior remains available.
+
 ## 10. Update the local plugin
 
 After source changes:
@@ -135,7 +137,7 @@ After source changes:
 Set-Location 'D:\work\maas\githup\dsh-modellix'
 pnpm run verify:pack
 pnpm pack
-dsh plugin --profile web add .\dsh-modellix-0.2.0.tgz
+dsh plugin --profile web add .\dsh-modellix-0.2.1.tgz
 dsh --profile web --dump-config
 dsh --profile web --no-open
 ```
@@ -147,8 +149,8 @@ dsh --profile web --no-open
 | A DeepSeek API Key dialog appears first | This is the fresh Harness profile's base initialization, not the Modellix dialog; complete it before configuring Modellix |
 | The CLI is logged in but the plugin still requests a Key | The CLI Keychain and Harness Credential service are separate; save it in the plugin UI or inject `MODELLIX_API_KEY` into the Harness process |
 | Modellix Design is missing | Inspect `--dump-config`, confirm Design is enabled, and fully restart the running profile after an update |
-| A task remains stale in assistant prose | Current status belongs to the live card and right panel; `0.2.0` updates the card in the background and avoids nonterminal status wording in ordinary prose |
-| One task shows two cards | This is not expected in `0.2.0`; record the job/tool call ids without Secrets and report a duplicate-card defect |
+| A task remains stale in assistant prose | Current status belongs to the live card and right panel; `0.2.1` updates the card in the background and avoids nonterminal status wording in ordinary prose |
+| One task shows two cards | This is not expected in `0.2.1`; record the job/tool call ids without Secrets and report a duplicate-card defect |
 | The UI reports an invalid Key | Only an explicit Modellix 401 enters this state; replace a local Credential in settings, or update an environment source and restart |
 | Balance is insufficient | A 402 is not treated as an invalid Key; fund the account or change the task before retrying manually |
 | Requests are rate-limited | Wait for the 429 window to end before retrying manually |

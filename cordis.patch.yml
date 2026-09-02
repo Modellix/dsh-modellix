@@ -1,16 +1,3 @@
-- id: web
-  config:
-    searchProvider: modellix
-    fetchProvider: modellix
-
-- id: tool-web
-  config:
-    search: true
-    fetch: true
-    searchTimeoutMs: 60000
-    fetchTimeoutMs: 60000
-  disabled: false
-
 - insert:
     - id: modellix
       name: dsh-modellix

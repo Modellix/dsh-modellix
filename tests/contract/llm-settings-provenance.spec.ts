@@ -3,7 +3,6 @@ import { createRequire } from "node:module";
 import { Context } from "@deepseek-ai/cordis";
 import {
   SettingsProvider,
-  settingsNamespace,
   type SettingsNamespace,
   type SettingsScope,
 } from "@deepseek-ai/dsh-settings";
@@ -11,8 +10,8 @@ import type z from "@deepseek-ai/schemastery";
 import { describe, expect, it } from "vitest";
 
 const PI_AI_MODULE_ID: string = "@deepseek-ai/dsh-llm-pi-ai";
-const EXPECTED_PI_AI_VERSION = "0.1.1-rc.2";
-const LLM_SETTINGS_NAMESPACE = settingsNamespace("llm-pi-ai");
+const EXPECTED_PI_AI_VERSION = "0.1.2-alpha.4";
+const LLM_SETTINGS_NAMESPACE = "llm-pi-ai" as SettingsNamespace;
 const PROVENANCE_FIELD = "__dshModellixMaterialization";
 const PROVENANCE_TOKEN = "llm_contract_provenance_1234";
 
