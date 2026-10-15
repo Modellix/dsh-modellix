@@ -1,6 +1,6 @@
 [English](../en-US/RELEASE_CHECKLIST.md) | [简体中文](RELEASE_CHECKLIST.md)
 
-# dsh-modellix 0.2.1 发布与验收清单
+# dsh-modellix 0.3.0 发布与验收清单
 
 本文用于人工产品验收和最终发布门禁。每一项都必须针对即将发布的准确包版本与 commit 检查。
 
@@ -23,7 +23,7 @@
 
 | 项目 | 预期 |
 | --- | --- |
-| 包 | `dsh-modellix@0.2.1` |
+| 包 | `dsh-modellix@0.3.0` |
 | Harness | `0.1.2-alpha.4` 最新矩阵，并兼容验证 `0.1.1-rc.2` |
 | 开发 Node | `24.18.1` |
 | pnpm | `11.24.0` |
@@ -219,7 +219,7 @@ pnpm run test:real:modellix
 
 两个文件必须：
 
-- 指向 `dsh-modellix@0.2.1`；
+- 指向 `dsh-modellix@0.3.0`；
 - 包含准确的 40 位小写 Git HEAD；
 - 使用不早于 72 小时的规范 UTC ISO-8601 时间；
 - 所有必填 check 均为 `passed`；
@@ -244,10 +244,10 @@ pnpm run verify:release
 5. 回读：
 
 ```sh
-npm view dsh-modellix@0.2.1 version dist.integrity dist.shasum --json --registry=https://registry.npmjs.org/ --prefer-online
+npm view dsh-modellix@0.3.0 version dist.integrity dist.shasum --json --registry=https://registry.npmjs.org/ --prefer-online
 ```
 
-6. 在仓库外空目录和全新 npm cache 中安装 `dsh-modellix@0.2.1`。
+6. 在仓库外空目录和全新 npm cache 中安装 `dsh-modellix@0.3.0`。
 7. 检查实际落盘版本和 `dsh --profile <isolated> --dump-config`。
 8. 删除临时 npm 配置、cache、tarball、profile、Evidence 中间文件和进程变量。
 

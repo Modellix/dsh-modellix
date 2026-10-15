@@ -8,6 +8,13 @@
 
 ![A real English Harness conversation showing a completed Modellix image result](docs/assets/chat-media-generation-en.webp)
 
+## What changed in 0.3.0
+
+- Task monitoring uses bounded server waits. Only a known task ID is observed, and stopping a wait never resubmits the paid generation.
+- Chat and result history stay responsive during a wait. Disabling Design, changing credentials, or closing the plugin cancels outstanding reads and prevents stale results from being saved.
+- Workspace uploads support the File API's image, video, and audio formats up to 16 MiB, with local file/container checks. Harness attachment uploads still use its image attachment reader. On quota errors, list files and explicitly delete only selected IDs through the File API or CLI; the plugin never deletes files automatically.
+- The server must support `wait=true`; an unsupported server produces a compatibility error instead of repeated short polling.
+
 ## What changed in 0.2.1
 
 - The Web switch now unregisters only `modellix_web_search` and `modellix_web_fetch`. Harness-native Web tools and providers remain available, so turning Modellix Web off falls back to the active profile's defaults.
@@ -60,7 +67,7 @@ To install a trusted local build:
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
+dsh plugin --profile web add ./dsh-modellix-0.3.0.tgz
 ```
 
 See [local usage](docs/en-US/LOCAL_USAGE.md) for the complete Windows-first workflow.
@@ -110,7 +117,7 @@ The **Modellix Design** button sits at the far right of the conversation header,
 - The entire Results list is expanded by default and can be collapsed.
 - Every result card is expanded by default and can be collapsed by selecting its header.
 - The close button returns focus to the launcher.
-- The advanced exact-parameter editor remains implemented but its entry is hidden in `0.2.1`; ordinary users work through chat.
+- The advanced exact-parameter editor remains implemented but its entry is hidden in `0.3.0`; ordinary users work through chat.
 - At 560 px and below, the panel uses the available viewport width. At 360 px and below, the launcher becomes a reachable compact control.
 
 ## LLM models

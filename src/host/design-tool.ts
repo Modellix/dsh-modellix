@@ -343,10 +343,10 @@ function createUploadFileTool(
 ): ToolDefinition {
   return defineTool({
     name: MODELLIX_MEDIA_UPLOAD_FILE_TOOL,
-    description: "Upload one image from the current conversation or session workspace to Modellix and return a temporary URL for media model inputs. Supply exactly one of attachment_id or path. Reuse returned URLs and never retry an unknown upload outcome automatically.",
+    description: "Upload an image attachment from this conversation or a supported image, video, or audio file inside the session workspace. Maximum 16 MiB (16777216 bytes). Supply exactly one of attachment_id or path. Reuse returned URLs and never retry an unknown upload outcome automatically. On quota errors, explicitly select unneeded files for deletion; never clean up automatically.",
     parameters: {
       attachment_id: { type: "string", description: "Attachment ID from an image in this conversation." },
-      path: { type: "string", description: "Image path inside the current session workspace." },
+      path: { type: "string", description: "Image, video, or audio path inside the current session workspace." },
     },
     output: {
       schema: {

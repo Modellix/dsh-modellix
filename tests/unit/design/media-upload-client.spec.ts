@@ -72,7 +72,7 @@ describe("Modellix media upload", () => {
     expect(request).toHaveBeenCalledOnce();
   });
 
-  it("reads only supported image files inside the session workspace", async () => {
+  it("reads supported media files inside the session workspace", async () => {
     const workspace = await createTemporaryDirectory();
     const input = join(workspace, "input.png");
     const gif = join(workspace, "input.gif");
@@ -85,9 +85,7 @@ describe("Modellix media upload", () => {
       filename: "input.png",
       mimeType: "image/png",
     });
-    await expect(prepareMediaUploadFromPath(workspace, gif)).rejects.toThrow(
-      "Unsupported media type; use PNG, JPEG, or WebP",
-    );
+    await expect(prepareMediaUploadFromPath(workspace, gif)).resolves.toMatchObject({ mimeType: "image/gif" });
     await expect(prepareMediaUploadFromPath(workspace, join(outside, "outside.png"))).rejects.toThrow(
       "Media path must stay inside the session workspace",
     );

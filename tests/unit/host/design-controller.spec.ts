@@ -20,9 +20,86 @@ const ASR_MODEL_ID = "openai/gpt-audio-transcribe";
 const ASR_SCHEMA_URL = "https://www.modellix.ai/models/openai/gpt-audio-transcribe/api_schema";
 
 describe("DesignHostController", () => {
+  it("shares an in-flight wait while local reads remain responsive and observations serialize", async () => {
+    let finishWait: ((response: Response) => void) | undefined;
+    let taskReads = 0;
+    const harness = controllerHarness(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === new URL(SCHEMA_URL).pathname) return jsonResponse(modelSchema());
+      if (url.pathname === "/api/v1/models") return catalogResponse();
+      if (String(input) === SUBMIT_URL && init?.method === "POST") {
+        return jsonResponse({ task_id: "task-shared-wait", status: "queued" });
+      }
+      if (url.pathname === "/api/v1/tasks/task-shared-wait") {
+        taskReads += 1;
+        expect(url.searchParams.get("wait")).toBe("true");
+        return new Promise<Response>((resolve) => { finishWait = resolve; });
+      }
+      throw new Error("Unexpected request");
+    });
+    const selected = await selectDefaultModel(harness.controller, "session-shared-wait");
+    const draft = requireDraft(selected);
+    await harness.controller.handle("design/submit", {
+      version: 1, sessionId: "session-shared-wait", modelId: MODEL_ID,
+      draftRevision: draft.draftRevision, irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "One submission, shared wait" },
+    });
+    const first = harness.controller.pollRunning();
+    await vi.waitFor(() => expect(taskReads).toBe(1));
+    const second = harness.controller.pollRunning();
+    const snapshot = await harness.controller.handle("design/read", {
+      version: 1, sessionId: "session-shared-wait",
+    });
+    expect(snapshot.jobs[0]?.status).toBe("running");
+    expect(taskReads).toBe(1);
+    finishWait?.(jsonResponse({ data: { task_id: "task-shared-wait", status: "succeeded", resources: [] } }));
+    await Promise.all([first, second]);
+    const completed = await harness.controller.handle("design/read", {
+      version: 1, sessionId: "session-shared-wait",
+    });
+    expect(completed.jobs[0]?.status).toBe("succeeded");
+    assertNoSecretOnWire(completed, harness.values);
+  });
+
+  it("aborts invalidated waits and rejects observations from an old credential epoch", async () => {
+    let epoch = 7;
+    let finishWait: ((response: Response) => void) | undefined;
+    let waitSignal: AbortSignal | null | undefined;
+    const harness = controllerHarness(async (input, init) => {
+      const url = String(input).replace(/\?.*$/u, "");
+      if (url === SCHEMA_URL) return jsonResponse(modelSchema());
+      if (url.startsWith(CATALOG_URL)) return catalogResponse();
+      if (url === SUBMIT_URL && init?.method === "POST") {
+        return jsonResponse({ task_id: "task-epoch-wait", status: "queued" });
+      }
+      if (url.endsWith("/tasks/task-epoch-wait")) {
+        waitSignal = init?.signal;
+        return new Promise<Response>((resolve) => { finishWait = resolve; });
+      }
+      throw new Error("Unexpected request");
+    }, { credentialEpoch: () => epoch });
+    const selected = await selectDefaultModel(harness.controller, "session-epoch-wait");
+    const draft = requireDraft(selected);
+    await harness.controller.handle("design/submit", {
+      version: 1, sessionId: "session-epoch-wait", modelId: MODEL_ID,
+      draftRevision: draft.draftRevision, irContractHash: draft.irContractHash,
+      parameters: { "/prompt": "Do not persist old results" },
+    });
+    const running = harness.controller.pollRunning().catch(() => false);
+    await vi.waitFor(() => expect(finishWait).toBeDefined());
+    const before = [...harness.values.values()];
+    epoch = 8;
+    harness.controller.invalidateWaits();
+    expect(waitSignal?.aborted).toBe(true);
+    finishWait?.(jsonResponse({ data: { task_id: "task-epoch-wait", status: "succeeded", resources: [] } }));
+    await running;
+    expect([...harness.values.values()]).toEqual(before);
+    expect(await harness.controller.pollRunning()).toBe(false);
+  });
+
   it("exposes stable localizable notice codes instead of Host prose", async () => {
     const catalogUnavailable = controllerHarness(async (input) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url.startsWith(CATALOG_URL)) return jsonResponse({ error: "offline" }, 503);
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -33,7 +110,7 @@ describe("DesignHostController", () => {
     expect(unavailable.notice).toBe("catalog-unavailable");
 
     const schemaInvalid = controllerHarness(async (input) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SCHEMA_URL) return jsonResponse({});
       throw new Error(`Unexpected fetch: ${url}`);
@@ -48,7 +125,7 @@ describe("DesignHostController", () => {
 
   it("uses required exact text for TTS while keeping ASR without generation text unavailable", async () => {
     const tts = controllerHarness(async (input) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url.startsWith(CATALOG_URL)) return catalogResponseFor(TTS_MODEL_ID, "audio");
       if (url === TTS_SCHEMA_URL) {
         return jsonResponse({
@@ -77,7 +154,7 @@ describe("DesignHostController", () => {
     expect(requireDraft(selected).primaryInputPath).toBe("/text");
 
     const asr = controllerHarness(async (input) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url.startsWith(CATALOG_URL)) return catalogResponseFor(ASR_MODEL_ID, "audio");
       if (url === ASR_SCHEMA_URL) {
         return jsonResponse({
@@ -107,7 +184,7 @@ describe("DesignHostController", () => {
     let paidPosts = 0;
     let plannerBody: unknown;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === PLANNER_URL && init?.method === "POST") {
@@ -198,7 +275,7 @@ describe("DesignHostController", () => {
       resolvePlanner = resolve;
     });
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === PLANNER_URL && init?.method === "POST") {
@@ -254,7 +331,7 @@ describe("DesignHostController", () => {
     let schemaReads = 0;
     let paidPosts = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) {
         schemaReads += 1;
         return jsonResponse(activeSchema);
@@ -313,7 +390,7 @@ describe("DesignHostController", () => {
     let postHeaders = new Headers();
     let paidPosts = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -376,7 +453,7 @@ describe("DesignHostController", () => {
   it("persists submit-unknown and refuses to replay the stale request, including after restart", async () => {
     let paidPosts = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -440,7 +517,7 @@ describe("DesignHostController", () => {
     let paidPosts = 0;
     let acceptedWrites = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -480,7 +557,7 @@ describe("DesignHostController", () => {
   it("never marks a successful paid POST as rejected when its task core cannot be stored", async () => {
     let paidPosts = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -523,7 +600,7 @@ describe("DesignHostController", () => {
   it("preserves submit-unknown when its WAL annotation cannot be stored", async () => {
     let paidPosts = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -568,7 +645,7 @@ describe("DesignHostController", () => {
     let paidPosts = 0;
     let taskReads = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -615,7 +692,7 @@ describe("DesignHostController", () => {
     let now = Date.parse("2026-08-25T01:30:00.000Z");
     let taskReads = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -652,6 +729,7 @@ describe("DesignHostController", () => {
       parameters: { "/prompt": "A safe result" },
     });
 
+    await harness.controller.pollRunning();
     const completed = await harness.controller.handle("design/read", {
       version: 1,
       sessionId: "session-poll",
@@ -686,7 +764,7 @@ describe("DesignHostController", () => {
   it("polls a task-id-only submit response instead of leaving an unknown task stuck", async () => {
     let taskReads = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -713,6 +791,7 @@ describe("DesignHostController", () => {
       parameters: { "/prompt": "Finish after a status read" },
     });
 
+    await harness.controller.pollRunning();
     const completed = await harness.controller.handle("design/read", {
       version: 1,
       sessionId: "session-unknown-status",
@@ -729,7 +808,7 @@ describe("DesignHostController", () => {
     let nextTask = 0;
     const taskReads: string[] = [];
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -738,7 +817,7 @@ describe("DesignHostController", () => {
       }
       if (url.startsWith("https://api.modellix.ai/api/v1/tasks/task-fair-")) {
         taskReads.push(url);
-        return jsonResponse({ task_id: url.split("/").at(-1), status: "running" });
+        return jsonResponse({ data: { task_id: url.replace(/\?.*$/u, "").split("/").at(-1), status: "running", wait: { timed_out: true, elapsed_ms: 1 } } });
       }
       throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
     });
@@ -759,7 +838,7 @@ describe("DesignHostController", () => {
     expect(taskReads).toHaveLength(5);
     await harness.controller.pollRunning();
 
-    expect(new Set(taskReads.map((url) => url.split("/").at(-1)))).toEqual(new Set([
+    expect(new Set(taskReads.map((url) => url.replace(/\?.*$/u, "").split("/").at(-1)))).toEqual(new Set([
       "task-fair-1",
       "task-fair-2",
       "task-fair-3",
@@ -772,7 +851,7 @@ describe("DesignHostController", () => {
   it("persists an inaccessible-task diagnostic and never polls that task again", async () => {
     let taskReads = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -795,6 +874,7 @@ describe("DesignHostController", () => {
       parameters: { "/prompt": "A task that disappeared" },
     });
 
+    await harness.controller.pollRunning();
     const first = await harness.controller.handle("design/read", {
       version: 1,
       sessionId: "session-gone",
@@ -816,7 +896,7 @@ describe("DesignHostController", () => {
     let now = 10_000;
     let taskReads = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       if (url === SUBMIT_URL && init?.method === "POST") {
@@ -830,7 +910,7 @@ describe("DesignHostController", () => {
             headers: { "content-type": "application/json", "retry-after": "60" },
           });
         }
-        return jsonResponse({ task_id: "task-rate-limited", status: "running" });
+        return jsonResponse({ data: { task_id: "task-rate-limited", status: "running", wait: { timed_out: true, elapsed_ms: 1 } } });
       }
       throw new Error(`Unexpected fetch: ${String(init?.method)} ${url}`);
     }, { now: () => now });
@@ -845,6 +925,7 @@ describe("DesignHostController", () => {
       parameters: { "/prompt": "Wait for the rate limit" },
     });
 
+    await harness.controller.pollRunning();
     const limited = await harness.controller.handle("design/read", {
       version: 1,
       sessionId: "session-rate-limited",
@@ -861,6 +942,7 @@ describe("DesignHostController", () => {
     });
 
     now += 1;
+    await harness.controller.pollRunning();
     const resumed = await harness.controller.handle("design/read", {
       version: 1,
       sessionId: "session-rate-limited",
@@ -873,7 +955,7 @@ describe("DesignHostController", () => {
     let epoch = 7;
     let catalogReads = 0;
     const harness = controllerHarness(async (input) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) {
         catalogReads += 1;
@@ -907,7 +989,7 @@ describe("DesignHostController", () => {
     let catalogContainsModel = true;
     let paidPosts = 0;
     const harness = controllerHarness(async (input, init) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema());
       if (url.startsWith(CATALOG_URL)) {
         return catalogContainsModel ? catalogResponse() : emptyCatalogResponse();
@@ -943,7 +1025,7 @@ describe("DesignHostController", () => {
       Array.from({ length: 256 }, (_, index) => [`extra_${String(index)}`, { type: "string" }]),
     );
     const harness = controllerHarness(async (input) => {
-      const url = String(input);
+      const url = String(input).replace(/\?.*$/u, "");
       if (url === SCHEMA_URL) return jsonResponse(modelSchema(tooManyFields));
       if (url.startsWith(CATALOG_URL)) return catalogResponse();
       throw new Error(`Unexpected fetch: ${url}`);

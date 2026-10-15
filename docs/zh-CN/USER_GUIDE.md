@@ -2,7 +2,16 @@
 
 # dsh-modellix 用户指南
 
-本文说明 `0.2.1` 的当前体验。媒体创作以对话为主，不再存在独立 Design Tab；右侧 **Modellix Design** 是按会话隔离的结果工作区。
+本文说明 `0.3.0` 的当前体验。媒体创作以对话为主，不再存在独立 Design Tab；右侧 **Modellix Design** 是按会话隔离的结果工作区。
+
+
+## 0.3.0 的主要变化
+
+- 任务监控改为有界服务端等待，只观察已知任务 ID；停止等待不会重新提交计费生成。
+- 等待期间 Chat 与结果历史保持响应。关闭 Design、更换凭据或关闭插件时会取消未完成的读取，并阻止旧结果写入。
+- 工作区上传支持 File API 的图片、视频和音频格式，单文件上限 16 MiB，并校验本地文件与容器。Harness 附件仍使用其图片读取接口。配额不足时，通过 File API 或 CLI 列出文件并明确删除选中的 ID；插件不会自动清理文件。
+- 服务端需要支持 `wait=true`；不支持时会明确提示兼容性错误，不会回退为反复短轮询。
+
 
 ## 1. 安装与检查
 
@@ -28,7 +37,7 @@ dsh --profile web
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
+dsh plugin --profile web add ./dsh-modellix-0.3.0.tgz
 ```
 
 独立 Profile 与更新命令见 [LOCAL_USAGE.md](LOCAL_USAGE.md)。
@@ -80,7 +89,7 @@ dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
 - 结果列表和每张卡片默认展开。
 - 点击 **结果** 收起整个列表；点击卡片头部只收起该卡片。
 - 点击 X 关闭，键盘焦点回到入口。
-- 高级精准参数编辑器保留在实现中，但 `0.2.1` 隐藏入口。
+- 高级精准参数编辑器保留在实现中，但 `0.3.0` 隐藏入口。
 
 ## 4. 通过对话创建媒体
 
@@ -283,11 +292,11 @@ Provider 使用 OpenAI 兼容接口，重试次数为 `0`；目录不可用时�
 
 ### 同一任务出现两张卡
 
-`0.2.1` 不应出现。请在不包含 Secret 的情况下记录两张卡的 job id 和 tool call id。生成卡应赢得当前会话的任务展示权，匹配的结果查询卡应被抑制。
+`0.3.0` 不应出现。请在不包含 Secret 的情况下记录两张卡的 job id 和 tool call id。生成卡应赢得当前会话的任务展示权，匹配的结果查询卡应被抑制。
 
 ### 显示其他会话结果
 
-新建 `0.2.1` 任务不应出现。请记录受影响的 session/task id，并按会话隔离缺陷报告。
+新建 `0.3.0` 任务不应出现。请记录受影响的 session/task id，并按会话隔离缺陷报告。
 
 ### 媒体不能播放
 

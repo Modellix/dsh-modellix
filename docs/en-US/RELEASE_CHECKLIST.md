@@ -1,6 +1,6 @@
 [English](RELEASE_CHECKLIST.md) | [简体中文](../zh-CN/RELEASE_CHECKLIST.md)
 
-# dsh-modellix 0.2.1 Release and Acceptance Checklist
+# dsh-modellix 0.3.0 Release and Acceptance Checklist
 
 Use this document for manual product acceptance and for the final release gate. Check each item against the exact package/commit being released.
 
@@ -23,7 +23,7 @@ Record before testing:
 
 | Item | Expected |
 | --- | --- |
-| Package | `dsh-modellix@0.2.1` |
+| Package | `dsh-modellix@0.3.0` |
 | Harness | `0.1.2-alpha.4` latest matrix plus `0.1.1-rc.2` compatibility matrix |
 | Development Node | `24.18.1` |
 | pnpm | `11.24.0` |
@@ -219,7 +219,7 @@ Create Secret-free files outside the repository:
 
 Both files must:
 
-- target `dsh-modellix@0.2.1`;
+- target `dsh-modellix@0.3.0`;
 - contain the exact lowercase 40-character Git HEAD;
 - use a canonical UTC ISO-8601 completion time no older than 72 hours;
 - have status `passed` for every required check;
@@ -244,10 +244,10 @@ After all checks pass:
 5. Read back:
 
 ```sh
-npm view dsh-modellix@0.2.1 version dist.integrity dist.shasum --json --registry=https://registry.npmjs.org/ --prefer-online
+npm view dsh-modellix@0.3.0 version dist.integrity dist.shasum --json --registry=https://registry.npmjs.org/ --prefer-online
 ```
 
-6. From an empty external directory and fresh npm cache, install `dsh-modellix@0.2.1`.
+6. From an empty external directory and fresh npm cache, install `dsh-modellix@0.3.0`.
 7. Verify the installed version and `dsh --profile <isolated> --dump-config`.
 8. Remove temporary npm config, cache, tarball, profile, evidence intermediates, and process variables.
 

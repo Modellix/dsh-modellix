@@ -225,6 +225,7 @@ export class ModellixRuntime {
       ),
     });
     this.#design = new DesignHostController({
+      serializeObservation: (operation) => this.enqueueDesignWrite(operation),
       storage: designStorage,
       resolveCredential: () => this.resolveUsableCredential(),
       isCredentialEpochCurrent: (epoch) => epoch === this.#credential.credentialEpoch,
@@ -248,6 +249,9 @@ export class ModellixRuntime {
     this.#ctx.effect(() => this.#settings.watch((next, previous) => {
       if (this.#closing) return undefined;
       this.#config = next;
+      if (next.credentialEpoch !== previous.credentialEpoch || !next.services.design.enabled) {
+        this.#design.invalidateWaits();
+      }
       this.#catalog.invalidate();
       if (next.services.design.enabled !== previous.services.design.enabled) {
         this.syncDesignTools(next.services.design.enabled);
@@ -327,6 +331,7 @@ export class ModellixRuntime {
       return async () => {
         this.#closing = true;
         this.#lifecycleAbort.abort();
+        this.#design.invalidateWaits();
         this.#disposeDesignTools?.();
         this.#disposeDesignTools = undefined;
         if (this.#designPollTimer !== undefined) clearTimeout(this.#designPollTimer);
@@ -1161,7 +1166,10 @@ export class ModellixRuntime {
           }
           return this.enqueueDesignWrite(
             () => this.#design.handle(endpoint, payload, operationSignal),
-          );
+          ).then((snapshot) => {
+            this.scheduleDesignPoll(0);
+            return snapshot;
+          });
         },
       });
       return;
@@ -1202,9 +1210,7 @@ export class ModellixRuntime {
     if (this.#closing || this.#designPollTimer !== undefined) return;
     this.#designPollTimer = setTimeout(() => {
       this.#designPollTimer = undefined;
-      void this.enqueueDesignWrite(
-        () => this.#design.pollRunning(this.#lifecycleAbort.signal),
-      )
+      void this.#design.pollRunning(this.#lifecycleAbort.signal)
         .then((hasRunning) => {
           if (hasRunning) this.scheduleDesignPoll(5_000);
         })

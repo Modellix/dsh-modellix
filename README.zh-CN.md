@@ -8,6 +8,13 @@
 
 ![真实中文 Harness 会话中已完成的 Modellix 图片结果](docs/assets/chat-media-generation-zh.webp)
 
+## 0.3.0 的主要变化
+
+- 任务监控改为有界服务端等待，只观察已知任务 ID；停止等待不会重新提交计费生成。
+- 等待期间 Chat 与结果历史保持响应。关闭 Design、更换凭据或关闭插件时会取消未完成的读取，并阻止旧结果写入。
+- 工作区上传支持 File API 的图片、视频和音频格式，单文件上限 16 MiB，并校验本地文件与容器。Harness 附件仍使用其图片读取接口。配额不足时，通过 File API 或 CLI 列出文件并明确删除选中的 ID；插件不会自动清理文件。
+- 服务端需要支持 `wait=true`；不支持时会明确提示兼容性错误，不会回退为反复短轮询。
+
 ## 0.2.1 的主要变化
 
 - Web 开关现在只注销 `modellix_web_search` 与 `modellix_web_fetch`。Harness 原生 Web 工具和 Provider 保持可用，关闭 Modellix Web 后会回退到当前 Profile 的默认能力。
@@ -60,7 +67,7 @@ dsh --profile web
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
+dsh plugin --profile web add ./dsh-modellix-0.3.0.tgz
 ```
 
 完整 Windows 本地流程见[本地使用指南](docs/zh-CN/LOCAL_USAGE.md)。
@@ -110,7 +117,7 @@ Agent 会按实际情况：
 - 整个结果列表默认展开，可点击收起。
 - 每张结果卡默认展开，可点击卡片头部收起。
 - 点击 X 关闭后，焦点会回到入口按钮。
-- 高级精准参数编辑器已保留，但 `0.2.1` 暂不显示入口；普通用户通过 Chat 使用。
+- 高级精准参数编辑器已保留，但 `0.3.0` 暂不显示入口；普通用户通过 Chat 使用。
 - 560px 及以下使用可用视口全宽；360px 及以下入口变为可触达的紧凑按钮。
 
 ## LLM 模型

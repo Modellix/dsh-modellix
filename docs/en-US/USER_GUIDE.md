@@ -2,7 +2,16 @@
 
 # dsh-modellix User Guide
 
-This guide describes the current `0.2.1` experience. Media creation is chat-first; there is no standalone Design tab. The right-side **Modellix Design** panel is a session-scoped result workspace.
+This guide describes the current `0.3.0` experience. Media creation is chat-first; there is no standalone Design tab. The right-side **Modellix Design** panel is a session-scoped result workspace.
+
+
+## What changed in 0.3.0
+
+- Task monitoring uses bounded server waits. Only a known task ID is observed, and stopping a wait never resubmits the paid generation.
+- Chat and result history stay responsive during a wait. Disabling Design, changing credentials, or closing the plugin cancels outstanding reads and prevents stale results from being saved.
+- Workspace uploads support the File API's image, video, and audio formats up to 16 MiB, with local file/container checks. Harness attachment uploads still use its image attachment reader. On quota errors, list files and explicitly delete only selected IDs through the File API or CLI; the plugin never deletes files automatically.
+- The server must support `wait=true`; an unsupported server produces a compatibility error instead of repeated short polling.
+
 
 ## 1. Install and verify
 
@@ -28,7 +37,7 @@ To use a local package artifact:
 pnpm install --frozen-lockfile
 pnpm run verify:release:static
 pnpm pack
-dsh plugin --profile web add ./dsh-modellix-0.2.1.tgz
+dsh plugin --profile web add ./dsh-modellix-0.3.0.tgz
 ```
 
 See [LOCAL_USAGE.md](LOCAL_USAGE.md) for isolated-profile setup and update commands.
@@ -80,7 +89,7 @@ It does not add a standalone Design tab.
 - Results and every card are expanded by default.
 - Select **Results** to collapse the whole list; select a card header to collapse only that card.
 - Select X to close. Keyboard focus returns to the launcher.
-- The advanced exact-parameter editor remains in the implementation but its entry is hidden for `0.2.1`.
+- The advanced exact-parameter editor remains in the implementation but its entry is hidden for `0.3.0`.
 
 ## 4. Create media by chatting
 
@@ -283,11 +292,11 @@ Keep the conversation open long enough for the Client watcher, verify the Creden
 
 ### Two cards represent one task
 
-This is not expected in `0.2.1`. Capture the two job ids and tool call ids without Secrets. The generation card should win the per-session task claim, and the matching result-query card should be suppressed.
+This is not expected in `0.3.0`. Capture the two job ids and tool call ids without Secrets. The generation card should win the per-session task claim, and the matching result-query card should be suppressed.
 
 ### Results from another conversation appear
 
-This is not expected for new `0.2.1` tasks. Record the affected session/task ids and report it as a session-isolation defect.
+This is not expected for new `0.3.0` tasks. Record the affected session/task ids and report it as a session-isolation defect.
 
 ### Media cannot play
 

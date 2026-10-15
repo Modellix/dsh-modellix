@@ -50,6 +50,7 @@ interface CredentialSnapshot {
 }
 
 export interface DesignHostControllerOptions {
+  readonly serializeObservation?: (operation: () => Promise<void>) => Promise<void>;
   readonly storage: StoragePort;
   readonly resolveCredential: () => Promise<CredentialSnapshot | undefined>;
   readonly isCredentialEpochCurrent: (credentialEpoch: number) => boolean;
@@ -188,6 +189,11 @@ export class DesignHostController {
   #catalogNotice: DesignNoticeCode | null = null;
   #catalogCredentialEpoch: number | null = null;
   #pollCursor = 0;
+  #pollInFlight: Promise<boolean> | undefined;
+  #pollAbort: AbortController | undefined;
+  #pollEpoch: number | undefined;
+  #observationTail: Promise<void> = Promise.resolve();
+  readonly #serializeObservation: (operation: () => Promise<void>) => Promise<void>;
 
   constructor(options: DesignHostControllerOptions) {
     this.#repository = new DesignTaskRepository({ storage: options.storage });
@@ -199,6 +205,11 @@ export class DesignHostController {
     this.#rememberModel = options.rememberModel;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#now = options.now ?? Date.now;
+    this.#serializeObservation = options.serializeObservation ?? ((operation) => {
+      const run = this.#observationTail.then(operation);
+      this.#observationTail = run.catch(() => undefined);
+      return run;
+    });
   }
 
   async handle(
@@ -232,6 +243,30 @@ export class DesignHostController {
     if (!this.#isEnabled()) return false;
     const credential = await this.#resolveCredential();
     if (credential === undefined) return false;
+    if (this.#pollEpoch !== credential.credentialEpoch) this.invalidateWaits();
+    if (this.#pollInFlight !== undefined) return this.#pollInFlight;
+    const abort = new AbortController();
+    this.#pollAbort = abort;
+    this.#pollEpoch = credential.credentialEpoch;
+    const combined = signal === undefined ? abort.signal : AbortSignal.any([signal, abort.signal]);
+    const run = this.#waitRunning(credential, combined);
+    this.#pollInFlight = run;
+    try { return await run; } finally {
+      if (this.#pollInFlight === run) {
+        this.#pollInFlight = undefined;
+        this.#pollAbort = undefined;
+      }
+    }
+  }
+
+  invalidateWaits(): void {
+    this.#pollAbort?.abort();
+    this.#pollAbort = undefined;
+    this.#pollInFlight = undefined;
+    this.#pollEpoch = undefined;
+  }
+
+  async #waitRunning(credential: CredentialSnapshot, signal: AbortSignal): Promise<boolean> {
     const tasks = await this.#repository.listTasks();
     const active = tasks.filter((task) =>
       task.taskId !== null && task.credentialEpoch === credential.credentialEpoch &&
@@ -244,23 +279,31 @@ export class DesignHostController {
     const start = eligible.length === 0 ? 0 : this.#pollCursor % eligible.length;
     const batch = circularSlice(eligible, start, 5);
     this.#pollCursor = eligible.length === 0 ? 0 : (start + batch.length) % eligible.length;
-    for (const record of batch) {
-      if (!this.#isCredentialEpochCurrent(credential.credentialEpoch)) break;
+    await Promise.all(batch.map(async (record) => {
+      if (!this.#isCredentialEpochCurrent(credential.credentialEpoch)) return;
       try {
-        const task = await new PredictionClient({ fetch: this.#fetch }).readTask({
+        const task = await new PredictionClient({ fetch: this.#fetch }).waitTask({
           taskId: record.taskId as string,
           apiKey: credential.value,
           maxAttempts: 1,
           ...(signal === undefined ? {} : { signal }),
         });
-        await this.#repository.recordTaskObserved(task);
+        await this.#serializeObservation(async () => {
+          if (!signal.aborted && this.#isCredentialEpochCurrent(credential.credentialEpoch)) {
+            await this.#repository.recordTaskObserved(task);
+          }
+        });
       } catch (error) {
         if (signal?.aborted === true) throw error;
         const failure = classifyPollFailure(error, record.pollAttempt + 1, this.#now());
-        await this.#repository.recordPollFailure(record.taskId as string, failure);
+        await this.#serializeObservation(async () => {
+          if (!signal.aborted && this.#isCredentialEpochCurrent(credential.credentialEpoch)) {
+            await this.#repository.recordPollFailure(record.taskId as string, failure);
+          }
+        });
         await this.#markUnauthorized(error, credential.credentialEpoch);
       }
-    }
+    }));
     const after = await this.#repository.listTasks();
     return after.some((task) =>
       task.credentialEpoch === credential.credentialEpoch &&
@@ -273,7 +316,6 @@ export class DesignHostController {
     signal?: AbortSignal,
   ): Promise<DesignSnapshotWire> {
     const session = this.#session(input.sessionId);
-    if (this.#isEnabled()) await this.pollRunning(signal);
     const models = await this.#loadModelsSafely(signal);
     if (session.selectedModelId === null && models.length > 0) {
       const modelId = chooseDefaultModel(models, this.#getLastModel());

@@ -71,6 +71,7 @@ export interface ReadPredictionInput {
   readonly apiKey: string;
   readonly maxAttempts?: number;
   readonly signal?: AbortSignal;
+  readonly waitSeconds?: number;
 }
 
 export class PredictionClient {
@@ -216,11 +217,22 @@ export class PredictionClient {
     const apiKey = validateApiKey(input.apiKey);
     const maxAttempts = boundedAttempts(input.maxAttempts ?? 3);
     const url = new URL(`/api/v1/tasks/${encodeURIComponent(taskId)}`, PREDICTION_ORIGIN);
+    if (input.waitSeconds !== undefined) {
+      if (!Number.isSafeInteger(input.waitSeconds) || input.waitSeconds < 1 || input.waitSeconds > 45) {
+        throw new DesignError("INVALID_ARGUMENT", "Wait duration must be an integer from 1 to 45 seconds");
+      }
+      url.searchParams.set("wait", "true");
+      url.searchParams.set("timeout", String(input.waitSeconds));
+    }
+    const totalTimeout = input.waitSeconds === undefined ? this.#requestTimeoutMs
+      : input.waitSeconds * 1000 + 5000;
+    const overall = input.waitSeconds === undefined ? undefined : requestDeadline(input.signal, totalTimeout);
     let lastFailure: unknown = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       input.signal?.throwIfAborted();
-      const deadline = requestDeadline(input.signal, this.#requestTimeoutMs);
+      overall?.signal.throwIfAborted();
+      const deadline = overall ?? requestDeadline(input.signal, this.#requestTimeoutMs);
       try {
         const response = await this.#fetch(url, {
           method: "GET",
@@ -244,7 +256,7 @@ export class PredictionClient {
             );
           }
           lastFailure = failure;
-          await this.#waitBeforeRetry(attempt, failure.retryAfterMs, input.signal);
+          await this.#waitBeforeRetry(attempt, failure.retryAfterMs, overall?.signal ?? input.signal);
           continue;
         }
         let payload: unknown;
@@ -269,6 +281,13 @@ export class PredictionClient {
             "Task status response does not contain a valid task",
           );
         }
+        if (input.waitSeconds !== undefined && (task.status === "queued" || task.status === "running")) {
+          const data = asRecord(asRecord(payload)?.data);
+          const wait = asRecord(data?.wait);
+          if (typeof wait?.timed_out !== "boolean" || typeof wait.elapsed_ms !== "number") {
+            throw new DesignError("UNEXPECTED_RESPONSE", "The task API does not support server-side wait; keep the task ID and do not resubmit");
+          }
+        }
         this.#log({
           level: "info",
           event: "design.task.read",
@@ -281,7 +300,7 @@ export class PredictionClient {
       } catch (caught) {
         if (input.signal?.aborted === true) throw caught;
         if (deadline.timedOut()) {
-          if (attempt === maxAttempts) {
+          if (attempt === maxAttempts || input.waitSeconds !== undefined) {
             throw new DesignError(
               "TASK_READ_FAILED",
               "Task status request timed out within the retry bound",
@@ -289,7 +308,7 @@ export class PredictionClient {
             );
           }
           lastFailure = caught;
-          await this.#waitBeforeRetry(attempt, null, input.signal);
+          await this.#waitBeforeRetry(attempt, null, overall?.signal ?? input.signal);
           continue;
         }
         if (caught instanceof DesignError) {
@@ -303,7 +322,7 @@ export class PredictionClient {
           );
         }
         lastFailure = caught;
-        await this.#waitBeforeRetry(attempt, null, input.signal);
+        await this.#waitBeforeRetry(attempt, null, overall?.signal ?? input.signal);
       }
     }
     throw new DesignError(
@@ -311,6 +330,11 @@ export class PredictionClient {
       "Task status could not be read within the retry bound",
       { cause: lastFailure },
     );
+  }
+
+  /** Wait for one bounded server observation; does not submit or sleep between snapshots. */
+  async waitTask(input: Omit<ReadPredictionInput, "waitSeconds"> & { readonly timeoutSeconds?: number }): Promise<PredictionTask> {
+    return this.readTask({ ...input, waitSeconds: input.timeoutSeconds ?? 30, maxAttempts: input.maxAttempts ?? 1 });
   }
 
   async #waitBeforeRetry(

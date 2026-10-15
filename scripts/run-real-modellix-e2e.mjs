@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -109,15 +109,35 @@ for (const mediaCase of mediaCases) {
   plannedCases.push({ ...mediaCase, body, endpoint: modelSchema.submitUrl })
 }
 
+const journalPath = `${outputDirectory}/media-submissions.json`
+/** @type {Record<string, { phase: 'submitting' | 'accepted', taskId?: string }>} */
+const submissions = existsSync(journalPath) ? JSON.parse(readFileSync(journalPath, 'utf8')) : {}
+function saveSubmissions() {
+  writeFileSync(`${journalPath}.tmp`, `${JSON.stringify(submissions, null, 2)}\n`, { mode: 0o600 })
+  renameSync(`${journalPath}.tmp`, journalPath)
+}
 const mediaResults = []
 for (const mediaCase of plannedCases) {
-  const submitted = await predictionClient.submit({
-    endpoint: mediaCase.endpoint,
-    modelSlug: mediaCase.slug,
-    apiKey,
-    body: mediaCase.body,
-    requestId: `dsh-modellix-real-e2e-${mediaCase.category}-${Date.now()}`,
-  })
+  const previous = submissions[mediaCase.slug]
+  if (previous !== undefined && (previous.phase !== 'accepted' || !previous.taskId)) {
+    throw new Error(`${mediaCase.category} submission outcome is unknown; inspect the existing operation and never replay it`)
+  }
+  let submitted
+  if (previous?.taskId) {
+    submitted = await predictionClient.readTask({ taskId: previous.taskId, apiKey, maxAttempts: 1 })
+  } else {
+    submissions[mediaCase.slug] = { phase: 'submitting' }
+    saveSubmissions()
+    submitted = await predictionClient.submit({
+      endpoint: mediaCase.endpoint,
+      modelSlug: mediaCase.slug,
+      apiKey,
+      body: mediaCase.body,
+      requestId: `dsh-modellix-real-e2e-${mediaCase.category}-${Date.now()}`,
+    })
+    submissions[mediaCase.slug] = { phase: 'accepted', taskId: submitted.taskId }
+    saveSubmissions()
+  }
   const completed = await waitForTask(predictionClient, submitted, apiKey, mediaCase.timeoutMs)
   const resource = completed.resources.find((candidate) => candidate.kind === mediaCase.category)
   if (resource === undefined) {
@@ -202,14 +222,20 @@ async function runWeb(secret) {
  * @returns {Promise<PredictionTask>}
  */
 async function waitForTask(client, initial, secret, timeoutMs) {
-  const startedAt = Date.now()
+  const deadline = performance.now() + timeoutMs
   let task = initial
   while (!['succeeded', 'failed', 'canceled'].includes(task.status)) {
-    if (Date.now() - startedAt >= timeoutMs) {
+    const remaining = deadline - performance.now()
+    if (remaining < 1_000) {
       throw new Error(`Task ${task.taskId} did not finish within the acceptance deadline`)
     }
-    await delay(5_000)
-    task = await client.readTask({ taskId: task.taskId, apiKey: secret, maxAttempts: 3 })
+    task = await client.waitTask({
+      taskId: task.taskId,
+      apiKey: secret,
+      timeoutSeconds: Math.min(30, Math.floor(remaining / 1_000)),
+      maxAttempts: 1,
+      signal: AbortSignal.timeout(Math.ceil(remaining)),
+    })
   }
   if (task.status !== 'succeeded') throw new Error(`Task ${task.taskId} ended as ${task.status}`)
   return task
@@ -289,9 +315,4 @@ function assertOutsideRepository(path, name) {
   if (fromPackage.length === 0 || (fromPackage !== '..' && !fromPackage.startsWith(`..${sep}`) && !isAbsolute(fromPackage))) {
     throw new Error(`${name} must remain outside the repository`)
   }
-}
-
-/** @param {number} milliseconds */
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }

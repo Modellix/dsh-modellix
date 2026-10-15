@@ -6,6 +6,15 @@ The format follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-15
+
+### Changed
+
+- Replaced repeated immediate task reads with bounded server waits and an overall cancellation deadline.
+- Moved remote waits outside the shared Design write queue; observations remain serialized and credential-epoch guarded.
+- Added deterministic image, video, and audio upload validation up to 16 MiB and explicit file-quota recovery guidance.
+- Updated real API acceptance to exercise server waits without replaying media submissions.
+
 ## [0.2.1] - 2026-09-02
 
 ### Changed

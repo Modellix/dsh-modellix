@@ -1,8 +1,8 @@
 import { lstat, open, realpath } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
-import type { ImageAttachmentRef, ImageMediaType } from "@deepseek-ai/dsh-attachment";
+import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
 
 import { readBoundedResponseJson, requestDeadline } from "../core/http.js";
 import { DesignError } from "./errors.js";
@@ -17,7 +17,7 @@ const SAFE_FILE_ID = /^[A-Za-z0-9._~:+@=-]{1,512}$/u;
 export interface PreparedMediaUpload {
   readonly bytes: Uint8Array;
   readonly filename: string;
-  readonly mimeType: ImageMediaType;
+  readonly mimeType: string;
 }
 
 export interface MediaUploadRecord {
@@ -83,6 +83,10 @@ export class MediaUploadClient {
       );
     }
     if (!response.ok) {
+      if (response.status === 429) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new DesignError("SUBMIT_REJECTED", "Upload quota exceeded. List existing files and explicitly delete only unneeded files before trying again; no automatic cleanup was performed", { status: 429 });
+      }
       const ambiguous = response.status === 408 || response.status === 409 ||
         response.status === 425 || response.status === 429 || response.status >= 500;
       void response.body?.cancel().catch(() => undefined);
@@ -166,14 +170,21 @@ export async function prepareMediaUploadFromPath(
     if (!opened.isFile() || opened.size !== before.size || opened.dev !== before.dev || opened.ino !== before.ino) {
       throw new DesignError("INVALID_ARGUMENT", "Media file changed while it was being opened");
     }
-    bytes = await handle.readFile();
+    const bounded = Buffer.alloc(before.size + 1);
+    let offset = 0;
+    while (offset < bounded.length) {
+      const { bytesRead } = await handle.read(bounded, offset, bounded.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    bytes = bounded.subarray(0, offset);
   } finally {
     await handle.close();
   }
   if (bytes.byteLength !== before.size) {
     throw new DesignError("INVALID_ARGUMENT", "Media file changed while it was being read");
   }
-  const mimeType = detectImageMimeType(bytes);
+  const mimeType = detectMediaMimeType(bytes, resolved);
   return { bytes, filename: safeFilename(basename(resolved), mimeType), mimeType };
 }
 
@@ -193,23 +204,52 @@ function within(root: string, candidate: string): boolean {
   return suffix === "" || (!suffix.startsWith("..") && !isAbsolute(suffix));
 }
 
-function detectImageMimeType(bytes: Uint8Array): ImageMediaType {
+const MEDIA_EXTENSIONS: Readonly<Record<string, string>> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
+  gif: "image/gif", bmp: "image/bmp", tif: "image/tiff", tiff: "image/tiff",
+  heic: "image/heic", heif: "image/heif", mp4: "video/mp4", m4v: "video/x-m4v",
+  webm: "video/webm", mov: "video/quicktime", mkv: "video/x-matroska", avi: "video/x-msvideo",
+  mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac",
+  ogg: "audio/ogg", flac: "audio/flac", opus: "audio/opus", weba: "audio/webm",
+};
+
+function detectMediaMimeType(bytes: Uint8Array, filename: string): string {
+  const extension = extname(filename).slice(1).toLowerCase();
+  const expected = MEDIA_EXTENSIONS[extension];
+  if (expected === undefined) throw new DesignError("INVALID_ARGUMENT", "Unsupported media file extension");
+  const head = Buffer.from(bytes.subarray(0, 16)).toString("latin1");
+  const riffType = head.startsWith("RIFF") ? head.slice(8, 12) : "";
+  const iso = bytes.length >= 12 && head.slice(4, 8) === "ftyp";
+  const ebml = head.startsWith("\x1a\x45\xdf\xa3");
+  const audioFrame = bytes.length >= 2 && bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe0) === 0xe0;
+  const tiff = [0x49, 0x49, 0x2a, 0].every((byte, index) => bytes[index] === byte) ||
+    [0x4d, 0x4d, 0, 0x2a].every((byte, index) => bytes[index] === byte);
+  const formats: Readonly<Record<string, boolean>> = {
+    gif: /^GIF8[79]a/u.test(head), bmp: head.startsWith("BM"),
+    tif: tiff, tiff,
+    heic: iso && /^(?:heic|heix|hevc|hevx|mif1)$/u.test(head.slice(8, 12)),
+    heif: iso && /^(?:heic|heix|hevc|hevx|mif1|msf1)$/u.test(head.slice(8, 12)),
+    mp4: iso, m4v: iso, m4a: iso, mov: iso || head.slice(4, 8) === "moov",
+    avi: riffType === "AVI ", wav: riffType === "WAVE", webm: ebml, mkv: ebml, weba: ebml,
+    mp3: head.startsWith("ID3") || audioFrame, aac: audioFrame,
+    ogg: head.startsWith("OggS"), opus: head.startsWith("OggS"), flac: head.startsWith("fLaC"),
+  };
+  if (formats[extension] === true) return expected;
   if (bytes.length >= 8 && bytes.slice(0, 8).every((value, index) =>
-    value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index])) return "image/png";
+    value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index]) && expected === "image/png") return expected;
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
+    if (expected === "image/jpeg") return expected;
   }
   const ascii = (start: number, end: number): string =>
     new TextDecoder("ascii").decode(bytes.slice(start, end));
   if (bytes.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") {
-    return "image/webp";
+    if (expected === "image/webp") return expected;
   }
-  throw new DesignError("INVALID_ARGUMENT", "Unsupported media type; use PNG, JPEG, or WebP");
+  throw new DesignError("INVALID_ARGUMENT", "Unsupported media type or content does not match its extension");
 }
 
-function safeFilename(value: string, mimeType: ImageMediaType): string {
-  const extension = mimeType === "image/png" ? ".png" : mimeType === "image/webp"
-    ? ".webp" : ".jpg";
+function safeFilename(value: string, mimeType: string): string {
+  const extension = `.${Object.entries(MEDIA_EXTENSIONS).find(([, type]) => type === mimeType)?.[0] ?? "bin"}`;
   const headerSafe = value.normalize("NFC").replaceAll(/["\\/]/gu, "_");
   const cleaned = Array.from(headerSafe, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
