@@ -137,6 +137,20 @@ export class SettingsController extends ResourceController<SettingsSnapshotWire>
     return this.perform("load", () => this.#rpc.settings(signal));
   }
 
+  async refresh(signal?: AbortSignal): Promise<boolean> {
+    const previous = this.store.getSnapshot();
+    if (previous.data === null) return this.load(signal);
+    if (previous.pending !== null) return false;
+    try {
+      const data = await this.#rpc.settings(signal);
+      if (this.store.getSnapshot() !== previous) return false;
+      this.publishData(data);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   saveOnboarding(
     apiKey: string,
     services: ServiceTogglesWire,

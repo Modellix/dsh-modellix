@@ -97,6 +97,22 @@ function deferred<T>(): {
 }
 
 describe("Modellix Client resource controllers", () => {
+  it("keeps controls enabled during background refresh and discards a stale reply after a mutation", async () => {
+    const background = deferred<RpcResult<unknown>>();
+    let reads = 0;
+    const rpc = rpcFrom(async (_channel, endpoint) => endpoint === "state/get"
+      ? ++reads === 1 ? { ok: true, value: state(1) } : background.promise
+      : { ok: true, value: { version: 1, accepted: true, state: state(2) } });
+    const controller = new SettingsController(rpc);
+    await controller.load();
+    const refresh = controller.refresh();
+    expect(controller.store.getSnapshot().pending).toBeNull();
+    await controller.updateToggles({ design: false, llm: true, web: true }, 1);
+    background.resolve({ ok: true, value: state(1) });
+    await expect(refresh).resolves.toBe(false);
+    expect(controller.store.getSnapshot().data?.settingsRevision).toBe(2);
+  });
+
   it("publishes loading, ready, pending, and post-mutation settings snapshots", async () => {
     const calls: string[] = [];
     const rpc = rpcFrom(async (_channel, endpoint) => {

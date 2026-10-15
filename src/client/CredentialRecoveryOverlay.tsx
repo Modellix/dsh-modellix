@@ -57,7 +57,7 @@ export function CredentialRecoveryOverlay({
     const refresh = (): void => {
       const current = controller.store.getSnapshot();
       if (current.pending !== null || current.status === "loading") return;
-      void controller.load();
+      void controller.refresh();
     };
     refresh();
     const timer = window.setInterval(refresh, RECOVERY_REFRESH_MS);
