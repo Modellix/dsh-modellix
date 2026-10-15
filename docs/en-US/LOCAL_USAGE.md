@@ -88,8 +88,10 @@ An environment-sourced Modellix Key is read-only in the UI. Stop and restart Har
 ## 6. Start the local Web UI
 
 ```powershell
-dsh --profile web --no-open --host localhost
+dsh --profile web --no-open --port 3080 --trusted-host localhost:3080
 ```
+
+The supported Harness currently accepts only its loopback IP or all interfaces as a bind value. Keep the default loopback binding, allow `localhost:3080` through its trust fence, and open `http://localhost:3080/`. Do not use an all-interface bind for local acceptance.
 
 The terminal prints the actual address, such as `http://localhost:3080`. Open the printed address; do not assume the port is fixed.
 
@@ -139,7 +141,7 @@ pnpm run verify:pack
 pnpm pack
 dsh plugin --profile web add .\dsh-modellix-0.3.0.tgz
 dsh --profile web --dump-config
-dsh --profile web --no-open --host localhost
+dsh --profile web --no-open --port 3080 --trusted-host localhost:3080
 ```
 
 ## 11. Troubleshooting

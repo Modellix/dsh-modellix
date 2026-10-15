@@ -88,8 +88,10 @@ $env:MODELLIX_API_KEY = (Get-Content -LiteralPath 'D:\secrets\modellix-key.txt' 
 ## 6. 启动本地 Web UI
 
 ```powershell
-dsh --profile web --no-open --host localhost
+dsh --profile web --no-open --port 3080 --trusted-host localhost:3080
 ```
+
+当前受支持的 Harness 绑定值仅接受回环 IP 或全部网卡。保留默认的回环绑定，通过信任边界显式允许 `localhost:3080`，并打开 `http://localhost:3080/`；本地验收不要绑定全部网卡。
 
 终端会打印实际地址，例如 `http://localhost:3080`。用浏览器打开终端显示的地址，不要假定端口固定。
 
@@ -139,7 +141,7 @@ pnpm run verify:pack
 pnpm pack
 dsh plugin --profile web add .\dsh-modellix-0.3.0.tgz
 dsh --profile web --dump-config
-dsh --profile web --no-open --host localhost
+dsh --profile web --no-open --port 3080 --trusted-host localhost:3080
 ```
 
 ## 11. 常见问题
