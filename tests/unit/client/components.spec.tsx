@@ -351,6 +351,39 @@ afterEach(() => {
 });
 
 describe("Credential recovery overlay", () => {
+  it("keeps a rejected candidate error until the active credential editor closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const current = settingsFixture();
+      const rpc = testRpc(async (endpoint) => endpoint === "credential/save"
+        ? { ok: true, value: { version: 1, accepted: false, error: {
+            version: 1, service: "design", subsystem: "credential",
+            operation: "validate-candidate", code: "MODELLIX_CANDIDATE_KEY_INVALID",
+            httpStatus: null, retryable: false, credentialEpoch: null,
+            requestId: null, taskId: null, retryAfterMs: null,
+            messageKey: "modellix.error.candidate_key_invalid",
+          } } }
+        : { ok: true, value: current });
+      const controller = new SettingsController(rpc.client);
+      await controller.load();
+      const dialogs = credentialDialogCoordinatorFor(controller);
+      dialogs.open("settings-editor");
+      render(<RecoveryOverlayForTest controller={controller} t={t} />);
+      await act(async () => {
+        await controller.replaceCredential("obviously-fake", 2, current.services);
+      });
+      expect(controller.store.getSnapshot().errorCode).toBe("MODELLIX_CANDIDATE_KEY_INVALID");
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(controller.store.getSnapshot().errorCode).toBe("MODELLIX_CANDIDATE_KEY_INVALID");
+      const readsBeforeClose = rpc.calls.filter(({ endpoint }) => endpoint === "state/get").length;
+      await act(async () => { dialogs.close("settings-editor"); });
+      expect(rpc.calls.filter(({ endpoint }) => endpoint === "state/get").length).toBeGreaterThan(readsBeforeClose);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not nag again for a dismissed request token and reopens for a new explicit request", async () => {
     let current = settingsFixture({
       verification: "invalid",

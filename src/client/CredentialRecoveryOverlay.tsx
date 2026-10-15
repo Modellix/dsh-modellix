@@ -52,7 +52,8 @@ export function CredentialRecoveryOverlay({
   }, [dialogCoordinator, needsCredential, recoveryToken]);
 
   useEffect(() => {
-    if (recoveryPresented) return;
+    // A background refresh must not clear the active editor's validation error.
+    if (recoveryPresented || dialog.activeOwner !== null) return;
     const refresh = (): void => {
       const current = controller.store.getSnapshot();
       if (current.pending !== null || current.status === "loading") return;
@@ -61,7 +62,7 @@ export function CredentialRecoveryOverlay({
     refresh();
     const timer = window.setInterval(refresh, RECOVERY_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [controller, recoveryPresented]);
+  }, [controller, dialog.activeOwner, recoveryPresented]);
 
   useEffect(
     () => () => dialogCoordinator.release(RECOVERY_CREDENTIAL_DIALOG_OWNER),

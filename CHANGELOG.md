@@ -15,6 +15,10 @@ The format follows Keep a Changelog.
 - Added deterministic image, video, and audio upload validation up to 16 MiB and explicit file-quota recovery guidance.
 - Updated real API acceptance to exercise server waits without replaying media submissions.
 
+### Fixed
+
+- Keep API Key validation errors visible while a credential editor is open; background configuration refresh resumes after it closes.
+
 ## [0.2.1] - 2026-09-02
 
 ### Changed
