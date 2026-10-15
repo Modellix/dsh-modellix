@@ -35,6 +35,7 @@ interface DialogGateDecision {
 
 export interface DialogA11yOptions {
   readonly open: boolean;
+  readonly requestedOpen?: boolean;
   readonly container: RefObject<HTMLElement | null>;
   readonly externalDialogOwner?: RefObject<HTMLElement | null> | undefined;
   readonly initialFocusSelector?: string;
@@ -124,6 +125,7 @@ export function useExternalDialogGate(
 export function useDialogA11y(options: DialogA11yOptions): void {
   const {
     open,
+    requestedOpen = open,
     container,
     externalDialogOwner,
     initialFocusSelector,
@@ -133,6 +135,14 @@ export function useDialogA11y(options: DialogA11yOptions): void {
   const onEscapeRef = useRef(onEscape);
   const restoreTargetRef = useRef<HTMLElement | null>(null);
   onEscapeRef.current = onEscape;
+
+  // Record the opener during modal arbitration, before the host primitive mounts
+  // and its autofocus can replace document.activeElement.
+  useEffect(() => {
+    if (!requestedOpen || typeof document === "undefined") return;
+    restoreTargetRef.current ??=
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }, [requestedOpen]);
 
   useEffect(() => {
     if (!open || typeof document === "undefined") return;

@@ -39,9 +39,11 @@ function TestDialog({
 function GatedTestDialog({
   requestedOpen,
   externalDialogOwner,
+  autoFocus = false,
 }: {
   readonly requestedOpen: boolean;
   readonly externalDialogOwner?: RefObject<HTMLElement | null>;
+  readonly autoFocus?: boolean;
 }): ReactNode {
   const open = useExternalDialogGate(requestedOpen, externalDialogOwner);
   const container = useRef<HTMLDivElement | null>(null);
@@ -49,6 +51,7 @@ function GatedTestDialog({
     open,
     container,
     externalDialogOwner,
+    requestedOpen,
     initialFocusSelector: "[data-initial]",
     mandatory: false,
     onEscape: () => undefined,
@@ -57,7 +60,7 @@ function GatedTestDialog({
   return (
     <div role="dialog" aria-modal="true" aria-label="Plugin dialog">
       <div ref={container} data-mdlx-dialog-surface="" tabIndex={-1}>
-        <button type="button" data-initial="">Plugin action</button>
+        <button type="button" data-initial="" autoFocus={autoFocus}>Plugin action</button>
       </div>
     </div>
   );
@@ -113,6 +116,17 @@ afterEach(() => {
 });
 
 describe("dialog accessibility behavior", () => {
+  it("restores the opener when the host primitive autofocuses before effects", async () => {
+    const { trigger, appRoot, portal } = mountOutsideApplication();
+    appRoot.insertAdjacentHTML("afterbegin", '<button type="button">Unrelated action</button>');
+    const view = render(<GatedTestDialog requestedOpen={false} autoFocus />, { container: portal });
+    trigger.focus();
+    view.rerender(<GatedTestDialog requestedOpen autoFocus />);
+    await waitFor(() => expect(view.getByRole("button", { name: "Plugin action" })).toBe(document.activeElement));
+    view.rerender(<GatedTestDialog requestedOpen={false} autoFocus />);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it("defers a plugin dialog mounted with an external modal and resumes it after release", async () => {
     const { portal } = mountOutsideApplication();
     const view = render(

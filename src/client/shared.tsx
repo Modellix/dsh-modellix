@@ -236,6 +236,7 @@ export function CredentialModal(props: CredentialModalProps): ReactNode {
   }, [clear, onCancel]);
   useDialogA11y({
     open: surfaceOpen,
+    requestedOpen: open,
     container: contentRef,
     externalDialogOwner,
     initialFocusSelector: "[data-mdlx-initial-focus]",

@@ -18,6 +18,7 @@ The format follows Keep a Changelog.
 ### Fixed
 
 - Keep API Key validation errors visible while a credential editor is open; background configuration refresh resumes after it closes.
+- Restore keyboard focus to the credential editor's opener when a host Modal applies its own autofocus.
 
 ## [0.2.1] - 2026-09-02
 
